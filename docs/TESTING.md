@@ -1,466 +1,407 @@
 # Testing
 
-Four layers: unit, integration, E2E, and load tests. Migrations tested in CI before production.
+---
+
+## Overview
+
+| Layer | Tool | When |
+|-------|------|------|
+| Web unit/component | Vitest + React Testing Library | `npm run test` |
+| API unit | Vitest | `npm run test` in `apps/api/` |
+| API integration | Vitest + Miniflare | `npm run test:integration` |
+| DB / SQL | psql against test Supabase | CI only |
+| E2E | Playwright | `npm run test:e2e` |
+| Load | k6 | Pre-release manual runs |
 
 ---
 
-## Running Tests
+## Web App (`apps/web/`)
 
 ```bash
-# Unit + integration (from apps/web/)
-cd apps/web
-npm run test          # Vitest watch mode
-npm run test:run      # Single run (CI)
-npm run test:coverage # With coverage
-
-# MCP server (from apps/mcp-server/)
-cd apps/mcp-server
-python -m pytest -v
-python -m pytest test_server.py::test_rate_limiter -v  # specific test
-
-# E2E (dev server must be running)
-cd apps/web
-npm run test:e2e
-
-# Load test
-cd tests/load
-k6 run search.js --vus 50 --duration 30s
+npm run test         # Vitest unit tests (watch mode)
+npm run test:run     # Single run (for CI)
+npm run test:e2e     # Playwright end-to-end
 ```
 
----
-
-## Unit Tests — Vitest
-
-Location: `apps/web/src/**/*.test.ts`
-
-### What to test
-
-- Search result grouping (`src/lib/search.ts` — `groupResultsByWork`)
-- Slug parsing (`src/lib/works.ts` — `parseSlug`, `generateSlug`)
-- FRBR URI construction
-- Cursor encode/decode (`src/lib/pagination.ts`)
-- Status label mapping
-- Metadata helpers (`src/lib/i18n-metadata.ts` — `getAlternates`)
-- Zod schema validation (valid + invalid inputs for each API route schema)
-
-### Example
+### Unit / component tests
 
 ```typescript
-// src/lib/pagination.test.ts
-import { describe, it, expect } from "vitest"
-import { encodeCursor, decodeCursor } from "./pagination"
+// app/components/StatusBadge.test.tsx
+import { render, screen } from "@testing-library/react"
+import { StatusBadge } from "~/components/StatusBadge"
 
-describe("cursor pagination", () => {
-  it("encodes and decodes cursor stably", () => {
-    const original = { year: 2022, id: 42 }
-    const cursor = encodeCursor(original)
-    expect(decodeCursor(cursor)).toEqual(original)
-  })
-
-  it("cursor is base64url (no +/= chars)", () => {
-    const cursor = encodeCursor({ year: 2022, id: 42 })
-    expect(cursor).not.toMatch(/[+/=]/)
-  })
+test("berlaku status shows green label", () => {
+  render(<StatusBadge status="berlaku" />)
+  expect(screen.getByText("Berlaku")).toBeInTheDocument()
+  expect(screen.getByText("Berlaku").closest("span")).toHaveClass("text-[--status-berlaku]")
 })
 
-// src/lib/schemas/search.test.ts
-import { describe, it, expect } from "vitest"
-import { SearchSchema } from "./search"
-
-describe("SearchSchema", () => {
-  it("rejects missing q", () => {
-    const result = SearchSchema.safeParse({})
-    expect(result.success).toBe(false)
-    expect(result.error?.flatten().fieldErrors.q).toBeDefined()
-  })
-
-  it("coerces limit string to number", () => {
-    const result = SearchSchema.safeParse({ q: "fintech", limit: "5" })
-    expect(result.success).toBe(true)
-    expect(result.data?.limit).toBe(5)
-  })
-
-  it("clamps limit to 50", () => {
-    const result = SearchSchema.safeParse({ q: "test", limit: "999" })
-    expect(result.success).toBe(false)
-  })
+test("dicabut status shows red label", () => {
+  render(<StatusBadge status="dicabut" />)
+  expect(screen.getByText("Dicabut")).toBeInTheDocument()
 })
 ```
 
----
+### TanStack Router testing
 
-## Integration Tests — Vitest + real Supabase
-
-Location: `apps/web/src/**/*.integration.test.ts`
-
-Uses a dedicated test Supabase project. Set in `apps/web/.env.test`:
-
-```env
-SUPABASE_TEST_URL=https://test-project.supabase.co
-SUPABASE_TEST_ANON_KEY=eyJ...
-SUPABASE_TEST_SERVICE_KEY=eyJ...
-```
-
-### What to test
-
-**Search:**
-- `search_regulations` RPC returns results for known Indonesian queries
-- Identity fast path: `"pojk 10 2022"` returns score 1000
-- Hybrid search: `"pendanaan bersama"` finds `LPBBTI` (synonym mapping)
-- Zero-result queries are logged to `search_analytics`
-- Sector filter reduces result set
-- Status filter excludes dicabut regulations
-
-**Works:**
-- `getWorkBySlug` resolves all three slug formats
-- ISR cache tag invalidation works after `revalidateTag`
-
-**Suggestions:**
-- POST to `/api/suggestions` creates a row with `status=pending`
-- Rate limit blocks after 10 requests/hour
-
-**apply_revision:**
-- Atomically creates revision + updates content + marks suggestion approved
-- Node `embedding` is set to NULL after revision (triggers regen)
-
-**RLS:**
-- Anon key cannot read `crawl_jobs`
-- Anon key cannot read `revisions`
-- Anon key can read `works`, `document_nodes`, `abstracts`
-
-**claim_jobs:**
-- Two concurrent calls don't claim the same job (SKIP LOCKED test)
+TanStack Start routes are tested with `createMemoryHistory` and a router wrapper:
 
 ```typescript
-// src/lib/search.integration.test.ts
-describe("search_regulations RPC", () => {
-  it("identity path: 'pojk 10 2022' scores 1000", async () => {
-    const { data } = await sb.rpc("search_regulations", {
-      p_query: "pojk 10 2022", p_limit: 1
-    })
-    expect(data[0].score).toBe(1000)
-  })
+import { RouterProvider, createRouter, createMemoryHistory } from "@tanstack/react-router"
+import { routeTree } from "~/routeTree.gen"
 
-  it("hybrid: concept query finds relevant regulations", async () => {
-    const { data } = await sb.rpc("search_regulations", {
-      p_query: "layanan pinjam meminjam uang berbasis teknologi", p_limit: 5
-    })
-    expect(data.length).toBeGreaterThan(0)
-    // Should find POJK 10/2022 (LPBBTI) even without exact term match
-    expect(data.some((r: any) => r.number === "10" && r.year === 2022)).toBe(true)
-  })
+function renderWithRouter(url: string) {
+  const router = createRouter({ routeTree, history: createMemoryHistory({ initialEntries: [url] }) })
+  return render(<RouterProvider router={router} />)
+}
 
-  it("logs zero-result queries to search_analytics", async () => {
-    const before = await sbService.from("search_analytics")
-      .select("id", { count: "exact" }).eq("zero_results", true).execute()
-
-    await sb.rpc("search_regulations", { p_query: "zxzxzxzx_nonexistent_term", p_limit: 10 })
-
-    const after = await sbService.from("search_analytics")
-      .select("id", { count: "exact" }).eq("zero_results", true).execute()
-
-    expect(after.count).toBe(before.count! + 1)
-  })
+test("search page shows results", async () => {
+  renderWithRouter("/search?q=fintech")
+  await screen.findByRole("list", { name: /hasil pencarian/i })
 })
 ```
 
 ---
 
-## MCP Server Tests — pytest
+## Hono API (`apps/api/`)
 
-Location: `apps/mcp-server/test_server.py`
+```bash
+cd apps/api
+npm run test              # Vitest unit tests
+npm run test:integration  # Integration tests via Miniflare
+```
 
-### What to test
+### Unit tests (with Miniflare)
 
-- All 5 tools return valid response shapes
-- `search_regulations`: hybrid path + identity path
-- `get_article`: exact text, correct ayat structure
-- `get_regulation_status`: correct for berlaku, dicabut regulations
-- `get_compliance_checklist`: non-empty for `sector=fintech`
-- Rate limiter: blocks after limit (mock Upstash or use test Redis)
-- Cache: second `get_article` call hits Redis (verify with mock)
-- Startup: server refuses to start with service role key as anon key
+Miniflare provides a local Cloudflare Workers runtime for testing — runs the actual Hono handler without deploying.
+
+```typescript
+// src/routes/search.test.ts
+import { unstable_dev } from "wrangler"
+import type { UnstableDevWorker } from "wrangler"
+
+let worker: UnstableDevWorker
+
+beforeAll(async () => {
+  worker = await unstable_dev("src/index.ts", {
+    experimental: { disableExperimentalWarning: true },
+    vars: {
+      SUPABASE_URL: process.env.TEST_SUPABASE_URL!,
+      SUPABASE_ANON_KEY: process.env.TEST_SUPABASE_ANON_KEY!,
+      OPENAI_API_KEY: process.env.TEST_OPENAI_API_KEY ?? "sk-test",
+      UPSTASH_REDIS_REST_URL: process.env.TEST_UPSTASH_URL!,
+      UPSTASH_REDIS_REST_TOKEN: process.env.TEST_UPSTASH_TOKEN!,
+    },
+  })
+})
+
+afterAll(async () => { await worker.stop() })
+
+test("POST /api/v1/search returns results for valid query", async () => {
+  const resp = await worker.fetch("/api/v1/search", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ q: "fintech", limit: 5 }),
+  })
+  expect(resp.status).toBe(200)
+  const data = await resp.json()
+  expect(data).toHaveProperty("results")
+  expect(Array.isArray(data.results)).toBe(true)
+})
+
+test("POST /api/v1/search rejects missing q", async () => {
+  const resp = await worker.fetch("/api/v1/search", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ limit: 5 }),
+  })
+  expect(resp.status).toBe(400)
+  const data = await resp.json()
+  expect(data.code).toBe("VALIDATION_ERROR")
+  expect(data.details).toHaveProperty("q")
+})
+
+test("rate limit returns 429 after 60 requests", async () => {
+  const requests = Array.from({ length: 65 }, () =>
+    worker.fetch("/api/v1/search", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "CF-Connecting-IP": "1.2.3.4" },
+      body: JSON.stringify({ q: "test", limit: 1 }),
+    })
+  )
+  const responses = await Promise.all(requests)
+  const statuses = responses.map(r => r.status)
+  expect(statuses.filter(s => s === 429).length).toBeGreaterThan(0)
+})
+```
+
+### Zod validation tests
+
+```typescript
+import { SearchSchema } from "../src/lib/schemas"
+
+test("SearchSchema requires q to be between 1-500 chars", () => {
+  expect(SearchSchema.safeParse({ q: "" }).success).toBe(false)
+  expect(SearchSchema.safeParse({ q: "a".repeat(501) }).success).toBe(false)
+  expect(SearchSchema.safeParse({ q: "fintech" }).success).toBe(true)
+})
+
+test("SearchSchema limits must be 1-50", () => {
+  expect(SearchSchema.safeParse({ q: "test", limit: 0 }).success).toBe(false)
+  expect(SearchSchema.safeParse({ q: "test", limit: 51 }).success).toBe(false)
+  expect(SearchSchema.safeParse({ q: "test", limit: 10 }).success).toBe(true)
+})
+```
+
+---
+
+## Database Integration
+
+Applied to a **test Supabase project** (separate from production). Never run against production.
+
+### Migration CI
+
+```yaml
+# .github/workflows/ci.yml
+- name: Apply migrations to test DB
+  env:
+    SUPABASE_TEST_DB_URL: ${{ secrets.SUPABASE_TEST_DB_URL }}
+  run: |
+    for f in $(ls packages/supabase/migrations/*.sql | sort); do
+      echo "Applying $f..."
+      psql "$SUPABASE_TEST_DB_URL" -f "$f"
+    done
+```
+
+Test Supabase project needs the same extensions as production:
+```sql
+CREATE EXTENSION IF NOT EXISTS pg_trgm;
+CREATE EXTENSION IF NOT EXISTS unaccent;
+CREATE EXTENSION IF NOT EXISTS vector;
+CREATE EXTENSION IF NOT EXISTS pg_cron;
+```
+
+### `search_regulations()` correctness
 
 ```python
-# test_server.py
-import pytest
-from unittest.mock import patch, AsyncMock
-from fastmcp.testing import MCPTestClient
-from server import mcp
+# tests/integration/test_search.py
+def test_fintech_p2p_lending_returns_pojk_10_2022(supabase):
+    """Layer 1 identity match: regulation code lookup."""
+    result = supabase.rpc("search_regulations", {
+        "p_query": "pojk 10 2022",
+        "p_limit": 5,
+        "p_query_embedding": None,
+    }).execute()
+    assert result.data, "Expected at least one result"
+    assert result.data[0]["score"] == 1000, "Identity match should score 1000"
+    assert "pojk-10-2022" in result.data[0]["slug"]
 
-@pytest.fixture
-def client():
-    return MCPTestClient(mcp)
+def test_semantic_query_finds_p2p_regulation(supabase, openai_client):
+    """Layer 4 semantic: vector search for synonym."""
+    embedding = openai_client.embeddings.create(
+        input="layanan pinjam meminjam uang berbasis teknologi",
+        model="text-embedding-3-small"
+    ).data[0].embedding
 
-def test_ping_includes_coverage(client):
-    result = client.call_tool("ping")
-    assert "embedding coverage" in result.lower()
+    result = supabase.rpc("search_regulations", {
+        "p_query": "layanan pinjam meminjam uang berbasis teknologi",
+        "p_limit": 5,
+        "p_query_embedding": embedding,
+    }).execute()
+    slugs = [r["slug"] for r in result.data]
+    assert "pojk-10-2022" in slugs, "POJK 10/2022 must appear in P2P lending semantic search"
 
-def test_search_returns_semantic_flag(client):
-    result = client.call_tool("search_regulations", {"query": "pembiayaan modal kerja"})
-    assert isinstance(result, list)
-    if result:
-        assert "semantic_used" in result[0]
+def test_zero_result_logged_to_analytics(supabase):
+    """Zero-result queries must appear in search_analytics."""
+    query = "peraturan tidak ada sama sekali xyzzy12345"
+    supabase.rpc("search_regulations", {
+        "p_query": query,
+        "p_limit": 5,
+        "p_query_embedding": None,
+    }).execute()
+    analytics = supabase.table("search_analytics").select("*").eq("query", query).execute()
+    assert analytics.data
+    assert analytics.data[0]["zero_results"] == True
+```
 
-def test_get_article_ayat_structure(client):
-    # Use a known regulation in test DB
-    result = client.call_tool("get_article", {
-        "regulation_type": "POJK", "number": "10", "year": 2022, "article_number": "1"
-    })
-    assert "ayat" in result
-    assert isinstance(result["ayat"], list)
+### `apply_revision()` correctness
 
-@patch("server.redis")
-def test_get_article_caches_result(mock_redis, client):
-    mock_redis.get.return_value = None  # cold cache
-    mock_redis.set = AsyncMock()
+```python
+def test_apply_revision_immutable_history(supabase_admin):
+    """apply_revision must insert into revisions and update content_text atomically."""
+    node_id = 1  # known test node
+    original = supabase_admin.table("document_nodes").select("content_text").eq("id", node_id).single().execute()
 
-    client.call_tool("get_article", {
-        "regulation_type": "POJK", "number": "10", "year": 2022, "article_number": "1"
-    })
-    mock_redis.set.assert_called_once()  # cached after first call
+    supabase_admin.rpc("apply_revision", {
+        "p_node_id": node_id,
+        "p_new_content": "Konten yang diperbarui untuk pengujian",
+        "p_reason": "Test correction",
+        "p_actor": "test-runner",
+    }).execute()
 
-def test_rate_limit_blocks_after_limit(client):
-    # 30 calls should pass, 31st should raise
-    for _ in range(30):
-        client.call_tool("search_regulations", {"query": "test"})
-    with pytest.raises(Exception, match="Rate limit"):
-        client.call_tool("search_regulations", {"query": "test"})
+    updated = supabase_admin.table("document_nodes").select("content_text, embedding").eq("id", node_id).single().execute()
+    assert updated.data["content_text"] == "Konten yang diperbarui untuk pengujian"
+    assert updated.data["embedding"] is None, "apply_revision must null embedding for backfill"
+
+    revisions = supabase_admin.table("revisions").select("*").eq("node_id", node_id).order("created_at", desc=True).limit(1).execute()
+    assert revisions.data
+    assert revisions.data[0]["old_content"] == original.data["content_text"]
+```
+
+### Concurrent job claiming (SKIP LOCKED)
+
+```python
+import asyncio
+
+async def test_claim_jobs_no_duplicate_claims(supabase_admin):
+    """Two concurrent workers must not claim the same job."""
+    supabase_admin.table("crawl_jobs").insert([
+        {"regulation_type": "POJK", "status": "pending"} for _ in range(10)
+    ]).execute()
+
+    async def claim():
+        return supabase_admin.rpc("claim_jobs", {"p_limit": 3}).execute().data
+
+    results = await asyncio.gather(*[claim() for _ in range(4)])
+    all_claimed_ids = [job["id"] for batch in results for job in batch]
+    assert len(all_claimed_ids) == len(set(all_claimed_ids)), "Duplicate job claims detected"
 ```
 
 ---
 
-## E2E Tests — Playwright
-
-Location: `apps/web/e2e/`
+## End-to-End (Playwright)
 
 ```bash
-npx playwright install chromium  # first time
-npm run test:e2e
+cd apps/web
+npm run test:e2e     # All E2E tests
+npm run test:e2e -- --headed  # With visible browser
 ```
 
-### Critical paths
-
-**Search flow (must pass on every PR):**
-```
-1. Homepage loads, search box visible
-2. Type "penyelenggaraan fintech" → results within 2s
-3. First result: title + regulation type badge + status badge
-4. Click result → regulation detail page
-5. Title, number, year, status all visible
-6. At least 5 pasals loaded with non-empty content text
-7. "Laporkan Kesalahan" button visible
-```
-
-**Hybrid search — semantic test:**
-```
-1. Search "modal minimum p2p" (not exact article text)
-2. Results include POJK 10/2022 (known to contain modal requirements)
-3. Snippet highlights the relevant content
-```
-
-**Browse by sector:**
-```
-1. /sektor — 6 sector cards, each with regulation count
-2. Click "Fintech" → /sektor/fintech
-3. List shows ≥1 regulation
-4. Year filter works
-5. Type filter (POJK) reduces results
-```
-
-**Regulation detail:**
-```
-1. /regulasi/pojk/pojk-10-2022 loads
-2. Status badge: Berlaku (green)
-3. BAB navigation: clicking BAB I scrolls to section
-4. Pasal numbers in font-mono
-5. "Lihat PDF" → valid Supabase Storage URL
-6. Amendment banner if regulation has relationships
-```
-
-**Suggestion submission:**
-```
-1. Open any pasal
-2. Click "Laporkan Kesalahan"
-3. Fill: current (pre-filled), suggestion, reason
-4. Submit → "Terima kasih" confirmation
-5. DB: suggestions table has new row with status=pending
-```
-
-**API docs:**
-```
-1. /api-docs loads Swagger UI
-2. GET /api/v1/search is listed
-3. "Try it out" → "fintech" query → results appear
-```
-
-**404 handling:**
-```
-1. /regulasi/pojk/pojk-99999-2099 → 404 page, not crash
-2. /api/v1/regulations/akn/id/act/pojk/9999/0 → JSON { error: "Not found" }
-3. /api/v1/search (no q) → 400 with Zod error details
-```
-
-**Mobile (375px viewport):**
-```
-1. Nav collapses to hamburger
-2. Search full-width
-3. Regulation cards readable, no horizontal overflow
-4. Pasal content readable
-```
-
-### Playwright config
+### Critical flows
 
 ```typescript
-// playwright.config.ts
-export default {
-  testDir: "./e2e",
-  use: {
-    baseURL: process.env.E2E_BASE_URL ?? "http://localhost:3000",
-    locale: "id-ID",
-  },
-  projects: [
-    { name: "desktop", use: { ...devices["Desktop Chrome"] } },
-    { name: "mobile",  use: { ...devices["iPhone 12"] } },
-  ],
-}
+// tests/e2e/search.spec.ts
+import { test, expect } from "@playwright/test"
+
+test("search for 'fintech' returns at least 5 results", async ({ page }) => {
+  await page.goto("/search?q=fintech")
+  await page.waitForSelector("[data-testid='search-result']")
+  const results = await page.$$("[data-testid='search-result']")
+  expect(results.length).toBeGreaterThanOrEqual(5)
+})
+
+test("regulation detail page renders pasal content", async ({ page }) => {
+  await page.goto("/regulasi/pojk/pojk-10-2022")
+  await page.waitForSelector("h1")
+  expect(await page.title()).toContain("LPBBTI")
+  const pasals = await page.$$("[data-testid='pasal-content']")
+  expect(pasals.length).toBeGreaterThan(0)
+})
+
+test("correction form submits successfully", async ({ page }) => {
+  await page.goto("/regulasi/pojk/pojk-10-2022")
+  await page.click("[data-testid='report-correction-btn']")
+  await page.fill("[name='suggested_content']", "Konten yang benar untuk pengujian ini.")
+  await page.fill("[name='reason']", "Alasan koreksi untuk pengujian.")
+  await page.click("button[type='submit']")
+  await expect(page.locator("[data-testid='success-toast']")).toBeVisible()
+})
+
+test("zero-result search shows empty state", async ({ page }) => {
+  await page.goto("/search?q=xyzzy12345notaregulation")
+  await page.waitForSelector("[data-testid='empty-state']")
+  const empty = await page.$("[data-testid='empty-state']")
+  expect(empty).toBeTruthy()
+})
+
+test("sector browse page loads fintech regulations", async ({ page }) => {
+  await page.goto("/sektor/fintech")
+  await page.waitForSelector("[data-testid='regulation-card']")
+  const cards = await page.$$("[data-testid='regulation-card']")
+  expect(cards.length).toBeGreaterThan(0)
+})
 ```
 
 ---
 
-## Load Tests — k6
+## Load Testing (k6)
 
-Location: `tests/load/`
-
-Test under realistic concurrent load before launch.
+Pre-release manual run only. Tests production-like query volume.
 
 ```javascript
 // tests/load/search.js
 import http from "k6/http"
-import { sleep, check } from "k6"
+import { check } from "k6"
 
-const BASE = __ENV.BASE_URL || "https://regulasi.id"
-const QUERIES = ["fintech", "perbankan modal", "pojk 10 2022", "kredit konsumtif", "asuransi jiwa"]
-
-export let options = {
-  stages: [
-    { duration: "30s", target: 10 },   // ramp up
-    { duration: "60s", target: 50 },   // sustained load
-    { duration: "10s", target: 0 },    // ramp down
-  ],
+export const options = {
+  vus: 50,
+  duration: "30s",
   thresholds: {
-    http_req_duration: ["p(95)<2000"],  // 95th percentile < 2s
-    http_req_failed:   ["rate<0.01"],   // < 1% errors
+    http_req_duration: ["p(95)<2000"],   // 95th percentile < 2 seconds
+    http_req_failed: ["rate<0.01"],       // < 1% error rate
   },
 }
 
+const QUERIES = ["fintech", "perbankan", "pojk 10 2022", "modal minimum p2p", "asuransi jiwa"]
+
 export default function () {
   const q = QUERIES[Math.floor(Math.random() * QUERIES.length)]
-  const res = http.get(`${BASE}/api/v1/search?q=${encodeURIComponent(q)}&limit=10`)
-  check(res, {
-    "status 200":    (r) => r.status === 200,
-    "has results":   (r) => JSON.parse(r.body).results?.length > 0,
+  const resp = http.post(
+    "https://api.regulasi.id/api/v1/search",
+    JSON.stringify({ q, limit: 10 }),
+    { headers: { "Content-Type": "application/json" } }
+  )
+  check(resp, {
+    "status 200": (r) => r.status === 200,
+    "has results field": (r) => JSON.parse(r.body).results !== undefined,
     "response < 2s": (r) => r.timings.duration < 2000,
   })
-  sleep(1)
 }
 ```
 
+Run:
 ```bash
-# Install k6
-brew install k6
-
-# Local load test
-k6 run tests/load/search.js --vus 50 --duration 30s
-
-# Against staging
-k6 run tests/load/search.js --vus 50 --duration 60s \
-  -e BASE_URL=https://staging.regulasi.id
+k6 run tests/load/search.js
 ```
 
-Targets: p95 search < 2s, p95 detail < 500ms, error rate < 1% at 50 concurrent users.
+If `p(95)` approaches 2s, check Supabase slow query log. Common culprits: FTS on large result sets, hnsw index not being used (check `EXPLAIN ANALYZE`).
 
 ---
 
-## Migration CI
+## Test Data Seed
 
-Every migration is applied to a test Supabase project in CI. Block merge if migration fails.
-
-```yaml
-# .github/workflows/ci.yml
-jobs:
-  db-migrations:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Apply migrations to test DB
-        env:
-          SUPABASE_DB_URL: ${{ secrets.SUPABASE_TEST_DB_URL }}  # direct, port 5432
-        run: |
-          for f in $(ls packages/supabase/migrations/*.sql | sort); do
-            echo "Applying $f..."
-            psql "$SUPABASE_DB_URL" -f "$f"
-          done
-
-  test-web:
-    runs-on: ubuntu-latest
-    needs: db-migrations
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with: { node-version: 20 }
-      - run: cd apps/web && npm ci
-      - run: cd apps/web && npm run lint
-      - run: cd apps/web && npx tsc --noEmit
-      - run: cd apps/web && npm run test:run
-      env:
-        SUPABASE_TEST_URL: ${{ secrets.SUPABASE_TEST_URL }}
-        SUPABASE_TEST_ANON_KEY: ${{ secrets.SUPABASE_TEST_ANON_KEY }}
-        UPSTASH_REDIS_REST_URL: ${{ secrets.UPSTASH_TEST_REDIS_URL }}
-        UPSTASH_REDIS_REST_TOKEN: ${{ secrets.UPSTASH_TEST_REDIS_TOKEN }}
-
-  test-mcp:
-    runs-on: ubuntu-latest
-    needs: db-migrations
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with: { python-version: "3.12" }
-      - run: cd apps/mcp-server && pip install -r requirements.txt
-      - run: cd apps/mcp-server && python -m pytest -v
-      env:
-        SUPABASE_URL: ${{ secrets.SUPABASE_TEST_URL }}
-        SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_TEST_ANON_KEY }}
-        UPSTASH_REDIS_REST_URL: ${{ secrets.UPSTASH_TEST_REDIS_URL }}
-        UPSTASH_REDIS_REST_TOKEN: ${{ secrets.UPSTASH_TEST_REDIS_TOKEN }}
+```bash
+python scripts/seed_test_db.py
 ```
 
-**Rule:** Never apply a migration to production until it passes migration CI.
+Seeds 50 realistic OJK regulations (POJK + SEOJK) across 5 sectors with realistic article structure. Includes:
+- 3 known regulations with specific slugs for E2E tests (`pojk-10-2022`, `pojk-77-2016`, `seojk-12-2018`)
+- Compliance mappings for fintech/p2p-lending
+- A suggestion in `pending` state for admin tests
+- Pre-generated embeddings stored in fixture JSON — no OpenAI calls during seed
+
+```python
+# scripts/seed_test_db.py
+import json, os
+from supabase import create_client
+
+def seed():
+    sb = create_client(os.environ["SUPABASE_URL"], os.environ["SUPABASE_KEY"])
+    fixture = json.load(open("tests/fixtures/seed_data.json"))
+    sb.table("works").upsert(fixture["works"], on_conflict="slug").execute()
+    sb.table("document_nodes").upsert(fixture["nodes"], on_conflict="id").execute()
+    sb.table("compliance_mappings").upsert(fixture["mappings"]).execute()
+    print(f"Seeded {len(fixture['works'])} works, {len(fixture['nodes'])} nodes")
+
+if __name__ == "__main__":
+    seed()
+```
 
 ---
 
-## Test Data
+## What NOT to test
 
-Dedicated test Supabase project (separate from production). Seed script: `scripts/seed_test_db.py`.
-
-Minimum seed:
-- 3 sectors: fintech, perbankan, pasar-modal
-- 5 regulations across sectors — including 1 dicabut, 1 diubah, 3 berlaku
-- 1 regulation with `work_relationships` (diubah_oleh)
-- 30+ pasals with real content text
-- 5 embeddings (pgvector) for semantic search test
-- 1 compliance_mapping for sector=fintech, business_type=p2p-lending
-- 1 pending suggestion
-
----
-
-## Coverage Targets
-
-| Layer | Target | Run in CI |
-|-------|--------|-----------|
-| Unit (Vitest) | 80% on `src/lib/` | Yes |
-| Integration | All RPC calls, all API routes | Yes |
-| E2E critical paths | All paths listed above | Yes (staging) |
-| MCP tools | All 5 tools + rate limiter + cache | Yes |
-| Load | p95 < 2s at 50 VUs | Before launch only |
-| Migration | Every migration applies cleanly | Yes, on every PR |
+- Tailwind CSS class names — test behavior, not presentation
+- shadcn/ui internals — trust the library
+- SQL migration idempotency — migrations are append-only, never re-run
+- OpenAI embedding quality — non-deterministic; test that the API call was made with correct inputs

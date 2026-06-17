@@ -7,7 +7,7 @@ Complete environment setup from zero to running locally.
 ## Prerequisites
 
 ```bash
-node --version    # 18+
+node --version    # 20+
 python3 --version # 3.12+
 gh --version      # GitHub CLI
 ```
@@ -20,134 +20,144 @@ brew install node python@3.12 gh git
 
 ## 1. Supabase Project
 
-1. Go to https://supabase.com/dashboard → New Project
-   - Name: `regulasi-id`
-   - Region: `Southeast Asia (Singapore)` — closest to Indonesia
-   - Password: generate strong, save it
+1. https://supabase.com/dashboard → New Project
+   - Name: `regulasi-id`, Region: `Southeast Asia (Singapore)`, save the password
 
-2. Enable extensions in SQL Editor:
+2. SQL Editor → enable extensions:
 ```sql
 CREATE EXTENSION IF NOT EXISTS pg_trgm;
 CREATE EXTENSION IF NOT EXISTS unaccent;
-CREATE EXTENSION IF NOT EXISTS vector;    -- pgvector for embeddings
+CREATE EXTENSION IF NOT EXISTS vector;    -- pgvector
 CREATE EXTENSION IF NOT EXISTS pg_cron;   -- materialized view refresh
 ```
 
-3. Enable **PgBouncer** in Settings → Database → Connection pooling → Enable.
-   Note both the pooler connection string (port 6543) and the direct connection (port 5432).
+3. Settings → Database → Connection pooling → Enable PgBouncer (transaction mode)
 
-4. From Settings → API, copy:
-   - `SUPABASE_URL`
-   - `SUPABASE_ANON_KEY`
-   - `SUPABASE_SERVICE_ROLE_KEY`
+4. Settings → API → copy: `SUPABASE_URL`, `SUPABASE_ANON_KEY`, `SUPABASE_SERVICE_ROLE_KEY`
 
 ---
 
 ## 2. Upstash Redis
 
-1. Go to https://upstash.com → New Database
-   - Name: `regulasi-id`
-   - Region: `Singapore` (ap-southeast-1) — matches Supabase
-   - Type: Regional (free tier)
+1. https://upstash.com → New Database → Singapore → Regional
+2. Copy: `UPSTASH_REDIS_REST_URL`, `UPSTASH_REDIS_REST_TOKEN`
 
-2. From the database dashboard, copy:
-   - `UPSTASH_REDIS_REST_URL`
-   - `UPSTASH_REDIS_REST_TOKEN`
-
-Used by both the web app and MCP server for distributed rate limiting and caching.
+Used by web app (TanStack Query persistence), Hono API (rate limiting), MCP server (caching).
 
 ---
 
-## 3. Sentry
+## 3. Cloudflare Account
 
-1. Go to https://sentry.io → New Project
-   - Platform: Next.js (for web), Python (for MCP + scripts)
-   - Create both projects, note both DSNs.
-
-2. Copy:
-   - `SENTRY_DSN` (web — also used as `NEXT_PUBLIC_SENTRY_DSN`)
-   - `SENTRY_DSN` for MCP server / pipeline (same project or separate)
+1. https://dash.cloudflare.com → sign up (free tier works)
+2. Install Wrangler:
+```bash
+npm install -g wrangler
+wrangler login
+```
 
 ---
 
-## 4. Apply Migrations
+## 4. Sentry
 
-Apply migrations via Supabase SQL Editor using the **direct connection** (port 5432). Apply in order:
+1. https://sentry.io → New Projects: `regulasi-id-web` (React), `regulasi-id-api` (Node), `regulasi-id-mcp` (Python)
+2. Copy each DSN
+
+---
+
+## 5. Apply Migrations
+
+Via Supabase SQL Editor (direct connection, port 5432 — not PgBouncer):
 
 ```bash
 ls packages/supabase/migrations/ | sort
 ```
 
-Copy each `.sql` file into the SQL Editor and run sequentially. The pgvector `hnsw` index build may take 30–60 seconds on larger tables — normal.
+Apply each `.sql` file in numerical order. The hnsw index build takes ~30s on first run — normal.
 
 ---
 
-## 5. Environment Files
-
-**Root `.env`** (never commit):
-```env
-SUPABASE_URL=https://xxx.supabase.co
-NEXT_PUBLIC_SUPABASE_URL=https://xxx.supabase.co
-NEXT_PUBLIC_SUPABASE_ANON_KEY=eyJ...
-SUPABASE_SERVICE_ROLE_KEY=eyJ...
-GEMINI_API_KEY=AIzaSy...
-OPENAI_API_KEY=sk-...
-```
+## 6. Environment Files
 
 **`apps/web/.env.local`**:
 ```env
-NEXT_PUBLIC_SUPABASE_URL=https://xxx.supabase.co
-NEXT_PUBLIC_SUPABASE_ANON_KEY=eyJ...
-ADMIN_EMAILS=your@email.com
-NEXT_PUBLIC_SITE_URL=http://localhost:3000
+VITE_SUPABASE_URL=https://xxx.supabase.co
+VITE_SUPABASE_ANON_KEY=eyJ...
+VITE_API_URL=http://localhost:8787
+VITE_SENTRY_DSN=https://xxx@sentry.io/yyy
+VITE_PLAUSIBLE_DOMAIN=localhost
+```
+
+**`apps/api/.dev.vars`** (local secrets for Wrangler):
+```
+SUPABASE_URL=https://xxx.supabase.co
+SUPABASE_ANON_KEY=eyJ...anon_key
+SUPABASE_SERVICE_ROLE_KEY=eyJ...service_role_key
+OPENAI_API_KEY=sk-...
 UPSTASH_REDIS_REST_URL=https://xxx.upstash.io
 UPSTASH_REDIS_REST_TOKEN=xxx
 SENTRY_DSN=https://xxx@sentry.io/yyy
-NEXT_PUBLIC_SENTRY_DSN=https://xxx@sentry.io/yyy
-NEXT_PUBLIC_PLAUSIBLE_DOMAIN=localhost
+ADMIN_EMAILS=your@email.com
 ```
 
 **`apps/mcp-server/.env`**:
-```env
+```
 SUPABASE_URL=https://xxx.supabase.co
-SUPABASE_ANON_KEY=eyJ...anon_key   ← NOT service role
+SUPABASE_ANON_KEY=eyJ...anon_key
 UPSTASH_REDIS_REST_URL=https://xxx.upstash.io
 UPSTASH_REDIS_REST_TOKEN=xxx
 SENTRY_DSN=https://xxx@sentry.io/yyy
 ```
 
 **`scripts/.env`**:
-```env
+```
 SUPABASE_URL=https://xxx.supabase.co
-SUPABASE_KEY=eyJ...service_role_key   ← bypasses RLS
+SUPABASE_KEY=eyJ...service_role_key
 GEMINI_API_KEY=AIzaSy...
 OPENAI_API_KEY=sk-...
-SENTRY_DSN=https://xxx@sentry.io/yyy
 ```
 
 ---
 
-## 6. Web App
+## 7. Web App
 
 ```bash
 cd apps/web
 npm install
-npm run dev         # → http://localhost:3000
+npm run dev       # → http://localhost:3000
 ```
 
-TypeScript check (doesn't require Vercel env):
+Add shadcn/ui components (first time):
 ```bash
-npx tsc --noEmit
+npx shadcn@latest init
+# Vite preset, Stone base color, CSS variables: yes
+npx shadcn@latest add button card input badge dialog table select textarea
 ```
 
 ---
 
-## 7. MCP Server
+## 8. API Server
+
+```bash
+cd apps/api
+npm install
+npm run dev       # → http://localhost:8787 (Wrangler dev server)
+```
+
+Test an endpoint:
+```bash
+curl -X POST http://localhost:8787/api/v1/search \
+  -H "Content-Type: application/json" \
+  -d '{"q": "fintech", "limit": 5}'
+```
+
+---
+
+## 9. MCP Server
 
 ```bash
 cd apps/mcp-server
 pip install -r requirements.txt
-python server.py    # → http://localhost:8000/mcp
+python server.py   # → http://localhost:8000/mcp
 ```
 
 Connect to Claude Code:
@@ -155,96 +165,96 @@ Connect to Claude Code:
 claude mcp add --transport http regulasi-id http://localhost:8000/mcp
 ```
 
-Test tools:
-```bash
-python -m pytest test_server.py -v
-```
-
 ---
 
-## 8. Data Pipeline
+## 10. Data Pipeline
 
 ```bash
-# From project root
 pip install -r scripts/requirements.txt
 
-# Verify JDIH is reachable
-python -m scripts.worker.run stats
-
-# Discover regulations (seeds crawl_jobs)
+# Test discovery (dry run)
 python -m scripts.worker.run discover --sectors fintech --dry-run
 
-# Process first batch (5 concurrent)
+# Process first 5 regulations
 python -m scripts.worker.run process --batch-size 5 --concurrency 2
 
-# Generate embeddings for pgvector
+# Generate embeddings
 python -m scripts.worker.run embed --batch-size 50
 ```
 
 ---
 
-## 9. Vercel Deployment
+## 11. Deployment
+
+### Web app (Vercel + TanStack Start)
 
 ```bash
-npm install -g vercel
-vercel login
-
-# From MONOREPO ROOT — not apps/web/
+# From MONOREPO ROOT
 vercel link --project regulasi-id-web --yes
 vercel --prod --yes
 ```
 
-Vercel project settings:
-- Root directory: `apps/web`
-- Framework: Next.js
-- Add all env vars from `apps/web/.env.local`
-- Add `SENTRY_AUTH_TOKEN` for automatic source map upload
+TanStack Start Vercel adapter handles SSR automatically.
 
----
+### API (Cloudflare Workers)
 
-## 10. Railway Deployment
+```bash
+cd apps/api
 
-**MCP server:**
-1. Railway → New Project → Deploy from GitHub → `alimaksudi/regulasi-id`
-2. Root directory: `apps/mcp-server`
-3. Add env vars: `SUPABASE_URL`, `SUPABASE_ANON_KEY`, `UPSTASH_REDIS_REST_URL`, `UPSTASH_REDIS_REST_TOKEN`, `SENTRY_DSN`
-4. Note deployed URL — no trailing slash
+# Set production secrets
+wrangler secret put SUPABASE_URL
+wrangler secret put SUPABASE_SERVICE_ROLE_KEY
+wrangler secret put OPENAI_API_KEY
+wrangler secret put UPSTASH_REDIS_REST_URL
+wrangler secret put UPSTASH_REDIS_REST_TOKEN
+wrangler secret put SENTRY_DSN
+wrangler secret put ADMIN_EMAILS
 
-**Worker:**
-1. Railway → same project → Add Service → Worker
-2. Start command: `python -m scripts.worker.run continuous --discovery-first`
-3. Add env vars: `SUPABASE_URL`, `SUPABASE_KEY`, `GEMINI_API_KEY`, `OPENAI_API_KEY`, `SENTRY_DSN`
+# Deploy
+wrangler deploy
+```
+
+Custom domain: add `api.regulasi.id` as a Workers route in Cloudflare dashboard.
 
 ---
 
 ## Verify Everything Works
 
 ```bash
-# DB + pgvector
+# Supabase + pgvector
 python -c "
-import os; from dotenv import load_dotenv; load_dotenv('scripts/.env')
-from supabase import create_client
+from dotenv import load_dotenv; load_dotenv('scripts/.env')
+import os; from supabase import create_client
 sb = create_client(os.environ['SUPABASE_URL'], os.environ['SUPABASE_KEY'])
-print('works:', sb.table('works').select('id', count='exact').execute().count)
 r = sb.rpc('search_regulations', {'p_query': 'fintech', 'p_limit': 1}).execute()
-print('search works:', bool(r.data))
+print('hybrid search:', bool(r.data), '| score:', r.data[0].get('score') if r.data else None)
 "
 
-# Upstash Redis (from web app context)
-node -e "
-const { Redis } = require('@upstash/redis')
-const r = new Redis({ url: process.env.UPSTASH_REDIS_REST_URL, token: process.env.UPSTASH_REDIS_REST_TOKEN })
-r.ping().then(v => console.log('Redis:', v))
-"
-
-# MCP ping
-curl -X POST http://localhost:8000/mcp \
+# Hono API
+curl http://localhost:8787/api/v1/sectors
+curl -X POST http://localhost:8787/api/v1/search \
   -H "Content-Type: application/json" \
-  -d '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"ping","arguments":{}},"id":1}'
-
-# Search API
-curl "http://localhost:3000/api/v1/search?q=fintech"
+  -d '{"q":"p2p lending","limit":3}'
 
 # OpenAPI spec
-curl "http://localhost:3000/api/openapi.json" | jq '.info'
+curl http://localhost:8787/api/openapi.json | python3 -m json.tool | head -20
+
+# Web app
+open http://localhost:3000
+
+# MCP ping
+python -c "
+import httpx, json
+r = httpx.post('http://localhost:8000/mcp',
+  json={'jsonrpc':'2.0','method':'tools/call','params':{'name':'ping','arguments':{}},'id':1})
+print(r.json()['result'])
+"
+
+# Upstash (from apps/api context)
+node -e "
+require('dotenv').config({path:'.dev.vars'})
+const {Redis} = require('@upstash/redis')
+const r = new Redis({url:process.env.UPSTASH_REDIS_REST_URL, token:process.env.UPSTASH_REDIS_REST_TOKEN})
+r.ping().then(v=>console.log('Redis:', v))
+"
 ```

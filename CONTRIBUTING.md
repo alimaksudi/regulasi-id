@@ -2,112 +2,125 @@
 
 ---
 
-## Branches
+## Getting Started
 
-| Branch | Purpose |
-|--------|---------|
-| `main` | Production. Auto-deploys to Vercel. |
-| `feat/short-description` | New features |
-| `fix/short-description` | Bug fixes |
-| `chore/short-description` | Tooling, deps, docs |
-| `db/short-description` | Database migrations only |
-
-Push to `main` directly for small fixes. For anything touching the DB schema or significant frontend changes, use a branch + PR.
+1. Read `CLAUDE.md` — the single source of truth for architecture, conventions, and gotchas.
+2. Set up the environment: `docs/SETUP.md`
+3. Find an issue or create one before starting large changes.
 
 ---
 
-## Commits
-
-Short imperative subject line. No period.
-
-```
-feat: add compliance checklist page
-fix: search returns empty for SEOJK queries
-chore: bump supabase-js to 2.x
-db: add compliance_mappings table (migration 009)
-```
-
-Use `db:` prefix for any commit that includes a migration file — makes it easy to find schema changes in git log.
-
----
-
-## Pull Requests
-
-Keep PRs focused — one concern per PR. Large schema changes and large UI changes should be separate PRs.
-
-PR title follows the same format as commit messages.
-
-PR description must include:
-- What changed and why (not what the code does)
-- For DB migrations: what tables/functions are added/changed
-- For frontend: screenshot or recording of the UI change
-- Test plan: what you tested manually before opening the PR
-
----
-
-## Database Migrations
-
-Always check the next migration number before creating one:
+## Development Workflow
 
 ```bash
-ls packages/supabase/migrations/ | sort | tail -5
-```
+# Feature branch
+git checkout -b feat/short-description
 
-File naming: `NNN_short_description.sql` (e.g., `009_compliance_mappings.sql`)
+# Run all services in three terminals:
+cd apps/web && npm run dev      # → localhost:3000
+cd apps/api && wrangler dev     # → localhost:8787
+cd apps/mcp-server && python server.py   # → localhost:8000/mcp
 
-Rules:
-- Always enable RLS on new tables
-- Always add public read policy for legal content tables
-- Always add indexes for columns used in WHERE/JOIN/ORDER BY
-- Run migration against a **test Supabase project** first, not production
-- Apply via Supabase SQL Editor (not `supabase db push` — the hosted project is managed directly)
+# Before committing:
+cd apps/web && npm run lint && npm run test:run
+cd apps/api && npm run lint && npm run test
 
-Do not:
-- Rename or delete existing migration files
-- Edit a migration that's already been applied to production
-- Use `DROP TABLE` or `DROP COLUMN` without a plan for zero-downtime
-
----
-
-## Code Review Checklist
-
-Before merging, verify:
-
-- [ ] TypeScript: `npx tsc --noEmit` passes
-- [ ] Lint: `npm run lint` clean
-- [ ] Unit tests pass: `npm run test:run`
-- [ ] Migration CI passes (applies cleanly to test Supabase project)
-- [ ] All new API route inputs validated with Zod schema
-- [ ] Rate limiting uses Upstash (not in-memory)
-- [ ] No hardcoded hex colors (use CSS variables)
-- [ ] No `useTranslations` in async Server Components (use `getTranslations`)
-- [ ] Navigation uses `@/i18n/routing` imports, not `next/link`
-- [ ] Admin routes call `requireAdmin()` at top
-- [ ] No `SUPABASE_SERVICE_ROLE_KEY` exposed to client code
-- [ ] New public pages have `generateMetadata` with hreflang alternates
-- [ ] New tables have RLS + public read policy
-- [ ] New migrations numbered correctly and include `SET search_path` on functions
-- [ ] pgvector columns have `hnsw` index with `vector_cosine_ops`
-- [ ] List endpoints use cursor pagination, not offset
-- [ ] Error paths call `Sentry.captureException()`
-
----
-
-## Local Dev Setup
-
-See [docs/SETUP.md](docs/SETUP.md).
-
-Quick start:
-```bash
-cd apps/web && npm install && npm run dev
+# Commit and push
+git push origin feat/short-description
 ```
 
 ---
 
-## Asking for Help
+## PR Requirements
 
-Open a GitHub Issue with:
-- What you were trying to do
-- What you expected
-- What happened instead (error message, screenshot)
-- Branch/commit you're on
+All PRs must pass CI before merge. The checklist below is what CI enforces — and what reviewers will check.
+
+### Checklist
+
+**General**
+- [ ] `npm run lint` passes (web + api — zero errors, warnings only if pre-existing)
+- [ ] All new code has tests (unit or integration, in the appropriate `*.test.ts`)
+- [ ] No `console.log` left in production paths (structured logging via `structlog` in Python, Sentry capture in Workers)
+- [ ] No hardcoded secrets, URLs, or environment-specific values
+
+**TypeScript / Frontend**
+- [ ] No `any` types introduced without a comment explaining why
+- [ ] `createServerFn()` for all SSR data fetching — never `useEffect` for initial data
+- [ ] Navigation uses `Link`, `useRouter`, `useNavigate` from `@tanstack/react-router` — not browser `window.location`
+- [ ] Icons from `lucide-react` only — no other icon library
+- [ ] Warm stone neutrals only (`stone-*`) — no `gray-*`, `slate-*`, `zinc-*`
+
+**Hono API**
+- [ ] Every new route has a `zValidator("json", Schema)` or `zValidator("query", Schema)` middleware — no raw `c.req.json()` without validation
+- [ ] Rate limiting via Upstash on mutating endpoints (`POST`, `DELETE`)
+- [ ] Secrets accessed via `c.env.SECRET_NAME` — never from `process.env` (Workers runtime doesn't have `process.env`)
+- [ ] No `Date.now()` or `Math.random()` in module scope — V8 isolates may reuse global state between requests
+- [ ] `c.executionCtx.waitUntil()` for fire-and-forget work (analytics logging, cache warming) — never floating promises
+- [ ] `wrangler dev` tested locally before PR — don't submit untested Workers code
+
+**Database**
+- [ ] New SQL migrations: verify next number with `ls packages/supabase/migrations/ | sort | tail -5` before creating
+- [ ] RLS enabled on every new table: `ALTER TABLE x ENABLE ROW LEVEL SECURITY`
+- [ ] Public read policy for legal data tables: `CREATE POLICY "Public read" ON x FOR SELECT USING (true)`
+- [ ] Indexes for every WHERE/JOIN/ORDER BY column
+- [ ] `document_nodes.content_text` mutations ONLY via `apply_revision()` — never direct UPDATE
+- [ ] No `COUNT(*)` on large tables via anon role (3s timeout) — use RPC with extended timeout or materialized view
+- [ ] pgvector: when `content_text` changes, `embedding` must be nulled to signal background backfill
+
+**Migration CI**
+- [ ] Migration applied to test Supabase project in CI before production
+- [ ] Heavy migrations (ALTER TABLE on large table): split into steps, set `statement_timeout = '600s'`
+
+**MCP Server (Python)**
+- [ ] New tool added to `server.json` and `public/llms.txt`
+- [ ] Upstash cache key follows pattern: `{tool}:{hash(args)}`
+- [ ] Rate limit checked before DB call
+- [ ] Sentry error capture on exceptions
+
+**Scraper / Pipeline (Python)**
+- [ ] Type hints on all new functions
+- [ ] New importers of changed functions: grep all `.py` files for uses before renaming/deleting
+- [ ] Quality scorer called on all new extractions — nothing loaded with score < 0.3 without manual review flag
+- [ ] Exponential backoff respected: don't retry immediately on failure
+
+---
+
+## What Belongs in a PR vs a Separate Issue
+
+Keep PRs focused. If you discover a related problem while working:
+- Small fix (< 10 lines): include in the same PR with a note
+- Larger fix: open a separate issue, link it in your PR description
+
+---
+
+## Commit Style
+
+```
+feat(search): add semantic search layer with RRF reranking
+fix(api): handle empty embedding response from OpenAI
+docs(mcp): document get_compliance_checklist parameters
+chore(deps): upgrade hono to 4.x
+```
+
+Format: `type(scope): short imperative description`
+
+Types: `feat`, `fix`, `docs`, `test`, `chore`, `refactor`, `perf`
+
+Scopes match component paths: `web`, `api`, `mcp`, `pipeline`, `db`, `search`
+
+---
+
+## Code Review Turnaround
+
+Maintainer reviews within 2 business days (Jakarta time, WIB). For urgent compliance-related fixes, tag the issue `urgent` and ping in the PR description.
+
+---
+
+## Not Accepted
+
+- Features not discussed in an issue first (for anything > small bug fix)
+- Changes that break the `search_regulations()` function signature — 3 consumers depend on it (web, API, MCP)
+- Direct `UPDATE document_nodes SET content_text = ...` — always via `apply_revision()`
+- Removing Zod validation from existing routes
+- Adding non-Lucide icon libraries
+- Cool neutral colors (`gray-*`, `slate-*`, `zinc-*`) in UI components

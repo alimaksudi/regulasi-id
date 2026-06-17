@@ -1,202 +1,205 @@
-# Admin Panel
+# Admin Guide
 
-Located at `/admin` — not internationalized, Indonesian only. Access requires Supabase auth + email in `ADMIN_EMAILS` env var.
+The admin interface is at `https://regulasi.id/admin`. It is client-side only — not SSR, not indexed, not cached. Requires Supabase Auth login with an email in `ADMIN_EMAILS`.
 
----
-
-## Authentication
-
-```typescript
-// Every admin route must call this first
-import { requireAdmin } from "@/lib/admin-auth"
-
-export default async function AdminPage() {
-  await requireAdmin()  // redirects to /admin/login if unauthorized
-  // ...
-}
-```
-
-`requireAdmin()` checks:
-1. Supabase session exists (`getUser()` — not `getSession()`)
-2. User email is in `ADMIN_EMAILS` env var (comma-separated)
-
-To add an admin: add their Supabase-registered email to `ADMIN_EMAILS` in Vercel.
+Admin API routes run in the Hono.js Worker at `api.regulasi.id/api/admin/*`. All admin API requests require a `Authorization: Bearer <jwt>` header. The JWT is issued by Supabase Auth on login and verified server-side in Cloudflare Workers — the Worker uses `SUPABASE_SERVICE_ROLE_KEY` for admin DB operations.
 
 ---
 
-## Pages
+## Admin Pages
 
 | Route | Purpose |
 |-------|---------|
-| `/admin/login` | Supabase Auth email/password login |
-| `/admin` | Dashboard — pending suggestions count, crawl stats, recent revisions |
-| `/admin/suggestions` | Suggestion queue (list + review) |
-| `/admin/suggestions/[id]` | Individual suggestion review page |
-| `/admin/regulations` | Browse/search all works in DB |
-| `/admin/regulations/[slug]` | Edit work metadata (status, subject_tags) |
-| `/admin/crawl` | Crawl job queue — status, retry failed jobs |
+| `/admin` | Dashboard — active work count, zero-result queries, recent suggestions |
+| `/admin/suggestions` | Suggestion review queue |
+| `/admin/compliance` | Compliance mapping CRUD |
+| `/admin/scraper` | Crawl job monitor |
+| `/admin/analytics` | Search analytics |
 
 ---
 
-## Suggestion Queue Flow
+## Admin API Routes (Hono.js)
 
-### 1. Submission (public)
+All routes require `Authorization: Bearer <supabase-jwt>`. Worker verifies JWT against Supabase and checks `ADMIN_EMAILS`.
 
-User submits from the regulation detail page:
-
-```
-POST /api/suggestions
-{
-  work_id, node_id, current_content, suggested_content, reason, email
-}
-→ suggestions.status = 'pending'
-```
-
-### 2. Gemini Verification (automated, optional)
-
-Admin triggers "Run AI Verification" from `/admin/suggestions` or it runs on a schedule:
-
-```python
-# scripts/agent/verify_suggestion.py
-result = verify_suggestion(suggestion_id)
-# → sets status = 'verified', agent_decision, agent_confidence, agent_modified_content
-```
-
-Gemini is **advisory only** — it cannot approve. It:
-- Checks if the suggested text matches the source PDF
-- Returns: `{ decision: 'approve' | 'reject' | 'uncertain', confidence: 0.0–1.0, notes: "..." }`
-- Optionally proposes a third corrected version (`agent_modified_content`)
-
-### 3. Admin Review
-
-Admin sees on `/admin/suggestions/[id]`:
-
-```
-Current text:    [node content from DB]
-User suggestion: [suggested_content]
-AI suggestion:   [agent_modified_content, if present]
-AI verdict:      Approve (confidence: 0.92) | Reject | Uncertain
-
-Actions:
-  [Apply User's Version]
-  [Apply AI's Version]     ← only shown if agent_modified_content present
-  [Reject]
-  [Edit & Apply]           ← free-form text field
-```
-
-### 4. Applying
-
-All approval paths call `apply_revision()`:
-
-```typescript
-// apps/web/src/app/api/admin/suggestions/[id]/apply/route.ts
-await supabase.rpc("apply_revision", {
-  p_node_id: suggestion.node_id,
-  p_new_content: finalContent,
-  p_reason: `Suggestion #${id} approved by admin`,
-  p_actor: `admin:${adminEmail}`,
-  p_suggestion_id: id,
-})
-```
-
-This atomically:
-1. Inserts row into `revisions` (old content + new content + actor)
-2. Updates `document_nodes.content_text` (FTS TSVECTOR auto-regenerates)
-3. Sets `suggestions.status = 'approved'`
-
-### 5. Rejection
-
-```typescript
-await supabase
-  .from("suggestions")
-  .update({ status: "rejected", admin_note: "reason", updated_at: new Date() })
-  .eq("id", id)
-```
-
-No revision is created on rejection.
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/api/admin/suggestions` | Pending suggestions (paginated) |
+| `POST` | `/api/admin/suggestions/:id/approve` | Approve + apply via `apply_revision()` |
+| `POST` | `/api/admin/suggestions/:id/reject` | Reject with optional reason |
+| `GET` | `/api/admin/compliance` | All compliance mappings |
+| `POST` | `/api/admin/compliance` | Create new mapping |
+| `PUT` | `/api/admin/compliance/:id` | Update mapping |
+| `DELETE` | `/api/admin/compliance/:id` | Delete mapping |
+| `GET` | `/api/admin/analytics` | Search analytics summary |
+| `GET` | `/api/admin/jobs` | Crawl job queue |
+| `POST` | `/api/admin/jobs/:id/retry` | Requeue a failed job |
+| `POST` | `/api/admin/revalidate` | Purge Upstash cache keys by pattern |
 
 ---
 
-## Crawl Management
+## Suggestion Review Workflow
 
-`/admin/crawl` shows:
+Suggestions come from public `POST /api/suggestions`. They go into `suggestions` table with `status: 'pending'`.
 
-| Column | Source |
-|--------|--------|
-| Sector | `crawl_jobs.sector_code` |
-| Type | `crawl_jobs.regulation_type` |
-| Pending | COUNT where status='pending' |
-| Processing | COUNT where status='crawling' |
-| Loaded | COUNT where status='loaded' |
-| Failed | COUNT where status='failed' |
+### Reviewing
 
-**Retry Failed Jobs** button:
+1. `/admin/suggestions` — lists all pending suggestions, sorted by newest first
+2. Each card shows: regulation title, article number, current text (highlighted diff), suggested text, submitter email (if provided)
+3. **Approve:** calls `POST /api/admin/suggestions/:id/approve`
+   - Worker calls `apply_revision()` in a single transaction
+   - `document_nodes.content_text` is updated
+   - `revisions` row inserted (audit trail)
+   - `suggestions.status` set to `approved`
+   - `document_nodes.embedding` nulled (triggers background backfill)
+4. **Reject:** calls `POST /api/admin/suggestions/:id/reject` with optional note
+   - `suggestions.status` set to `rejected`
+   - No content change
+
+### Important: `apply_revision()` is atomic
+
+`apply_revision()` runs all three steps — `INSERT revisions`, `UPDATE document_nodes.content_text`, `UPDATE suggestions.status` — in a single transaction. If any step fails, everything rolls back. Never manually UPDATE `document_nodes.content_text` from admin scripts.
+
+---
+
+## Compliance Mappings
+
+Compliance mappings (`compliance_mappings` table) power `GET /api/v1/compliance` and the `get_compliance_checklist` MCP tool.
+
+### Schema
+
 ```sql
-UPDATE crawl_jobs SET status = 'pending', error_message = NULL WHERE status = 'failed';
-```
-
-**Trigger Discovery** button: calls `POST /api/admin/crawl/discover` which runs the discover script for a given sector.
-
----
-
-## Editing Work Metadata
-
-From `/admin/regulations/[slug]`, admin can update:
-
-- `status` — berlaku | diubah | dicabut | tidak_berlaku
-- `subject_tags` — array of topic tags
-- `date_enacted`
-- `content_verified` — checkbox to mark as human-verified
-
-These are direct `UPDATE works` calls via service role. No revision log (metadata, not content).
-
----
-
-## API Routes (Admin)
-
-All under `/api/admin/` — require `requireAdmin()` at the handler level. All inputs Zod-validated.
-
-| Method | Route | Action |
-|--------|-------|--------|
-| GET | `/api/admin/suggestions` | List suggestions by status |
-| POST | `/api/admin/suggestions/[id]/apply` | Apply revision via `apply_revision()` |
-| POST | `/api/admin/suggestions/[id]/reject` | Reject with admin note |
-| POST | `/api/admin/suggestions/[id]/verify` | Trigger Gemini verification |
-| GET | `/api/admin/compliance` | List compliance_mappings |
-| POST | `/api/admin/compliance` | Add mapping |
-| DELETE | `/api/admin/compliance/[id]` | Remove mapping |
-| GET | `/api/admin/crawl/stats` | Crawl job counts by status + flagged |
-| POST | `/api/admin/crawl/retry` | Retry failed jobs (respects backoff) |
-| POST | `/api/admin/crawl/reset-dead` | Reset dead jobs to pending |
-| POST | `/api/admin/crawl/discover` | Trigger discovery for a sector |
-| GET | `/api/admin/analytics` | Zero-result queries, top searches |
-| PATCH | `/api/admin/regulations/[slug]` | Update work metadata |
-| POST | `/api/admin/revalidate` | ISR revalidation by slug |
-
----
-
-## Supabase Client in Admin Routes
-
-Admin API routes use the **service role** client to bypass RLS:
-
-```typescript
-// src/lib/supabase/service.ts
-import { createClient } from "@supabase/supabase-js"
-
-export const supabaseService = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.SUPABASE_SERVICE_ROLE_KEY!
+compliance_mappings (
+  id            bigint primary key,
+  sector        text,                   -- 'fintech', 'perbankan', etc.
+  business_type text,                   -- 'p2p-lending', NULL means sector-wide
+  work_id       bigint references works,
+  priority      text,                   -- 'required', 'recommended', 'informational'
+  notes         text                    -- optional human-readable explanation
 )
 ```
 
-Never import `supabaseService` in Server Components or client code — admin API routes only.
+### Adding a mapping
 
-## Analytics Dashboard
+Via `/admin/compliance` → New Mapping, or direct SQL:
 
-`/admin/analytics` surfaces the `search_analytics` table — the most honest signal for what content is missing:
+```sql
+INSERT INTO compliance_mappings (sector, business_type, work_id, priority, notes)
+VALUES (
+  'fintech',
+  'p2p-lending',
+  (SELECT id FROM works WHERE slug = 'pojk-10-2022'),
+  'required',
+  'Primary licensing regulation for P2P lending (LPBBTI) operators under OJK'
+);
+```
 
-- **Top zero-result queries** — regulations users searched for but we don't have. Use this to prioritize scraping new sectors or regulation types.
-- **Top queries overall** — what users care about most. Use this to prioritize compliance_mappings curation.
-- **Source breakdown** — web vs API vs MCP. If MCP dominates, Claude is actively using the tool.
+### When a regulation is revoked
 
-Read this dashboard weekly. Zero-result queries directly map to missing content.
+No manual cleanup needed. `GET /api/v1/compliance` filters `WHERE works.status != 'dicabut'` automatically. The revoked regulation disappears from compliance lists when its status is updated in `works`.
+
+### Seeding priority
+
+1. Fintech (highest user demand): POJK + SEOJK for P2P lending, payment systems, digital banking
+2. Perbankan: capital adequacy, risk management
+3. IKNB: insurance, pension funds
+
+---
+
+## Search Analytics
+
+`/admin/analytics` pulls from the `search_analytics` table.
+
+### Key metrics to monitor weekly
+
+```sql
+-- Top zero-result queries (content gap signals)
+SELECT query, COUNT(*) as count
+FROM search_analytics
+WHERE zero_results = true
+  AND created_at > NOW() - INTERVAL '7 days'
+GROUP BY query
+ORDER BY count DESC
+LIMIT 20;
+
+-- Failed sector searches (missing content)
+SELECT sector, COUNT(*) as count
+FROM search_analytics
+WHERE zero_results = true
+  AND created_at > NOW() - INTERVAL '7 days'
+GROUP BY sector
+ORDER BY count DESC;
+
+-- Most popular successful queries
+SELECT query, COUNT(*) as count, AVG(response_ms) as avg_ms
+FROM search_analytics
+WHERE zero_results = false
+  AND created_at > NOW() - INTERVAL '7 days'
+GROUP BY query
+ORDER BY count DESC
+LIMIT 20;
+```
+
+Zero-result queries are the most actionable product signal: they show what regulations users need that aren't in the system yet.
+
+---
+
+## Crawl Job Monitor
+
+`/admin/scraper` shows:
+- Active jobs (status = `processing`)
+- Failed jobs (status = `failed`, `dead`) with retry count and last error
+- Backlog (status = `pending`) by sector
+
+### Retrying failed jobs
+
+Via UI: Jobs tab → Filter Failed → select → Retry.
+
+Via API:
+```bash
+curl -X POST https://api.regulasi.id/api/admin/jobs/123/retry \
+  -H "Authorization: Bearer $ADMIN_JWT"
+```
+
+Resets job to `pending` and clears `next_retry_at` so the worker picks it up immediately.
+
+### Job status reference
+
+| Status | Meaning |
+|--------|---------|
+| `pending` | Waiting in queue |
+| `processing` | Claimed by a worker |
+| `done` | Successfully parsed and loaded |
+| `failed` | Errored — will retry (exponential backoff) |
+| `dead` | Failed 4+ times — will NOT retry automatically |
+| `skipped` | Unchanged since last crawl — no re-parse needed |
+
+---
+
+## Cache Management
+
+Upstash Redis cache TTLs:
+- `emb:{hash}` — query embeddings, 1h
+- `sector:all` — sector stats, 15min
+- `article:{id}` — article content, 24h
+- `compliance:{sector}:{type}` — compliance list, 1h
+
+To purge after bulk content update:
+```bash
+curl -X POST https://api.regulasi.id/api/admin/revalidate \
+  -H "Authorization: Bearer $ADMIN_JWT" \
+  -H "Content-Type: application/json" \
+  -d '{"pattern": "article:*"}'
+```
+
+---
+
+## Login / Auth
+
+Admin uses Supabase Auth directly. No special admin user table — only email allowlist via `ADMIN_EMAILS` env var in Cloudflare Workers.
+
+To add an admin:
+1. `wrangler secret put ADMIN_EMAILS` with new comma-separated value: `admin@example.com,other@example.com`
+2. The new admin must sign up at `/admin/login` to create a Supabase Auth account
+
+To remove an admin: remove their email from `ADMIN_EMAILS`, redeploy. Their existing JWT fails validation immediately on next request.

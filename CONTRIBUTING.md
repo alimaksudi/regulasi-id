@@ -76,6 +76,9 @@ Before merging, verify:
 - [ ] TypeScript: `npx tsc --noEmit` passes
 - [ ] Lint: `npm run lint` clean
 - [ ] Unit tests pass: `npm run test:run`
+- [ ] Migration CI passes (applies cleanly to test Supabase project)
+- [ ] All new API route inputs validated with Zod schema
+- [ ] Rate limiting uses Upstash (not in-memory)
 - [ ] No hardcoded hex colors (use CSS variables)
 - [ ] No `useTranslations` in async Server Components (use `getTranslations`)
 - [ ] Navigation uses `@/i18n/routing` imports, not `next/link`
@@ -83,7 +86,10 @@ Before merging, verify:
 - [ ] No `SUPABASE_SERVICE_ROLE_KEY` exposed to client code
 - [ ] New public pages have `generateMetadata` with hreflang alternates
 - [ ] New tables have RLS + public read policy
-- [ ] New migrations numbered correctly and tested against test DB
+- [ ] New migrations numbered correctly and include `SET search_path` on functions
+- [ ] pgvector columns have `hnsw` index with `vector_cosine_ops`
+- [ ] List endpoints use cursor pagination, not offset
+- [ ] Error paths call `Sentry.captureException()`
 
 ---
 

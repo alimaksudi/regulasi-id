@@ -154,18 +154,24 @@ These are direct `UPDATE works` calls via service role. No revision log (metadat
 
 ## API Routes (Admin)
 
-All under `/api/admin/` — require `requireAdmin()` at the handler level.
+All under `/api/admin/` — require `requireAdmin()` at the handler level. All inputs Zod-validated.
 
 | Method | Route | Action |
 |--------|-------|--------|
-| GET | `/api/admin/suggestions` | List pending suggestions |
-| POST | `/api/admin/suggestions/[id]/apply` | Apply revision |
-| POST | `/api/admin/suggestions/[id]/reject` | Reject suggestion |
+| GET | `/api/admin/suggestions` | List suggestions by status |
+| POST | `/api/admin/suggestions/[id]/apply` | Apply revision via `apply_revision()` |
+| POST | `/api/admin/suggestions/[id]/reject` | Reject with admin note |
 | POST | `/api/admin/suggestions/[id]/verify` | Trigger Gemini verification |
-| GET | `/api/admin/crawl/stats` | Crawl job counts by status |
-| POST | `/api/admin/crawl/retry-failed` | Reset failed jobs to pending |
+| GET | `/api/admin/compliance` | List compliance_mappings |
+| POST | `/api/admin/compliance` | Add mapping |
+| DELETE | `/api/admin/compliance/[id]` | Remove mapping |
+| GET | `/api/admin/crawl/stats` | Crawl job counts by status + flagged |
+| POST | `/api/admin/crawl/retry` | Retry failed jobs (respects backoff) |
+| POST | `/api/admin/crawl/reset-dead` | Reset dead jobs to pending |
 | POST | `/api/admin/crawl/discover` | Trigger discovery for a sector |
+| GET | `/api/admin/analytics` | Zero-result queries, top searches |
 | PATCH | `/api/admin/regulations/[slug]` | Update work metadata |
+| POST | `/api/admin/revalidate` | ISR revalidation by slug |
 
 ---
 
@@ -184,3 +190,13 @@ export const supabaseService = createClient(
 ```
 
 Never import `supabaseService` in Server Components or client code — admin API routes only.
+
+## Analytics Dashboard
+
+`/admin/analytics` surfaces the `search_analytics` table — the most honest signal for what content is missing:
+
+- **Top zero-result queries** — regulations users searched for but we don't have. Use this to prioritize scraping new sectors or regulation types.
+- **Top queries overall** — what users care about most. Use this to prioritize compliance_mappings curation.
+- **Source breakdown** — web vs API vs MCP. If MCP dominates, Claude is actively using the tool.
+
+Read this dashboard weekly. Zero-result queries directly map to missing content.

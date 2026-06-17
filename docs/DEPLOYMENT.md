@@ -1,12 +1,13 @@
 # Deployment
 
-Three services, three platforms:
+Four services, three platforms:
 
 | Service | Platform | Trigger |
 |---------|----------|---------|
-| Web app | Vercel | Auto on push to `main` |
-| MCP server | Railway | Auto on push to `main` |
-| Data pipeline | Railway (worker) | Cron or manual trigger |
+| Web app | Vercel | Auto on `main` push |
+| MCP server | Railway | Auto on `main` push |
+| Data pipeline worker | Railway | Cron + manual |
+| Redis | Upstash | Managed (no deploy) |
 
 ---
 
@@ -18,18 +19,16 @@ Three services, three platforms:
 npm install -g vercel
 vercel login
 
-# From MONOREPO ROOT (not apps/web/)
+# From MONOREPO ROOT (never from apps/web/)
 vercel link --project regulasi-id-web --yes
 ```
 
-Vercel project settings (set via dashboard):
+Vercel project settings (dashboard):
 - Root directory: `apps/web`
-- Framework preset: Next.js
+- Framework: Next.js
 - Node version: 20.x
-- Build command: `npm run build` (default)
-- Output directory: `.next` (default)
 
-### Environment variables (set in Vercel dashboard)
+### Required environment variables (Vercel dashboard)
 
 ```
 NEXT_PUBLIC_SUPABASE_URL
@@ -37,6 +36,12 @@ NEXT_PUBLIC_SUPABASE_ANON_KEY
 SUPABASE_SERVICE_ROLE_KEY
 ADMIN_EMAILS
 NEXT_PUBLIC_SITE_URL=https://regulasi.id
+UPSTASH_REDIS_REST_URL
+UPSTASH_REDIS_REST_TOKEN
+SENTRY_DSN
+NEXT_PUBLIC_SENTRY_DSN
+SENTRY_AUTH_TOKEN         ← for source map upload
+NEXT_PUBLIC_PLAUSIBLE_DOMAIN=regulasi.id
 ```
 
 ### Deploy
@@ -46,20 +51,30 @@ NEXT_PUBLIC_SITE_URL=https://regulasi.id
 vercel --prod --yes
 ```
 
-Auto-deploy is on — pushing to `main` triggers a production deploy automatically. Run manual deploy only when you need to force a redeploy without a code change (e.g., after updating env vars).
+Auto-deploy fires on every `main` push — manual deploy only needed when env vars changed without code change.
 
 ### Rollback
 
 ```bash
-vercel rollback                    # roll back to previous deployment
-vercel rollback <deployment-url>   # roll back to specific deployment
+vercel rollback                      # previous deployment
+vercel rollback <deployment-url>     # specific deployment
 ```
 
-Or from Vercel dashboard: Deployments → find previous → Promote to Production.
+Or via Vercel dashboard → Deployments → Promote to Production.
+
+### ISR revalidation
+
+After bulk DB updates, revalidate ISR cache for affected pages:
+
+```bash
+curl -X POST https://regulasi.id/api/admin/revalidate \
+  -H "Cookie: your-session-cookie" \
+  -d '{"slug": "pojk-10-2022"}'
+```
 
 ### Preview deploys
 
-Every PR automatically gets a preview URL: `https://regulasi-id-git-{branch}-{team}.vercel.app`. Preview deploys use the same env vars as production — be careful if your branch writes to the DB.
+Every PR gets a preview URL. Preview uses production env vars — be careful if your branch writes to the DB.
 
 ---
 
@@ -67,171 +82,279 @@ Every PR automatically gets a preview URL: `https://regulasi-id-git-{branch}-{te
 
 ### First-time setup
 
-1. Create a Railway account → New Project → Deploy from GitHub
-2. Select `alimaksudi/regulasi-id` repo
-3. Set root directory: `apps/mcp-server`
-4. Railway auto-detects `Dockerfile`
+1. Railway → New Project → Deploy from GitHub → `alimaksudi/regulasi-id`
+2. Root directory: `apps/mcp-server`
+3. Railway auto-detects Dockerfile
 
-### Environment variables (set in Railway dashboard)
+### Environment variables (Railway dashboard)
 
 ```
-SUPABASE_URL=https://xxx.supabase.co
-SUPABASE_ANON_KEY=eyJ...anon_key   ← NOT service role key
+SUPABASE_URL
+SUPABASE_ANON_KEY     ← anon key ONLY — never service role
+UPSTASH_REDIS_REST_URL
+UPSTASH_REDIS_REST_TOKEN
+SENTRY_DSN
+PORT                  ← set automatically by Railway
 ```
 
-`PORT` is set automatically by Railway.
-
-### The no-trailing-slash rule
-
-The deployed MCP URL must not have a trailing slash:
+### No trailing slash rule
 
 ```
 ✓  https://xxx.up.railway.app/mcp
 ✗  https://xxx.up.railway.app/mcp/
 ```
 
-Railway returns a 307 redirect for the trailing-slash form, which breaks Claude Code's HTTP transport.
+Railway 307-redirects the trailing slash form, which breaks Claude Code's HTTP transport.
 
 ### Update MCP URL in 5 places
 
-When the Railway URL changes, update all of these:
+When Railway URL changes:
 1. `apps/web/src/app/[locale]/connect/page.tsx`
-2. `apps/web/src/app/[locale]/page.tsx` (landing MCP card)
+2. `apps/web/src/app/[locale]/page.tsx`
 3. `server.json`
 4. `apps/web/public/llms.txt`
 5. `README.md`
 
 ### Rollback
 
-Railway keeps deployment history. From Railway dashboard: Deployments → previous deploy → Redeploy.
+Railway dashboard → Deployments → previous deploy → Redeploy.
 
 ---
 
 ## Data Pipeline Worker — Railway
 
-### Setup
-
-Same Railway project, separate service. Root directory: project root (not `scripts/`).
+Same Railway project, separate service (Add Service → Worker from same repo).
 
 Start command:
-```bash
+```
 python -m scripts.worker.run continuous --discovery-first
 ```
 
 ### Environment variables
 
 ```
-SUPABASE_URL=https://xxx.supabase.co
-SUPABASE_KEY=eyJ...service_role_key   ← service role, bypasses RLS
-GEMINI_API_KEY=AIzaSy...
+SUPABASE_URL
+SUPABASE_KEY          ← service role — bypasses RLS for writes
+GEMINI_API_KEY
+OPENAI_API_KEY        ← for embedding generation
+SENTRY_DSN
 ```
 
-### Running manually
+### Cron jobs (Railway Cron)
+
+```
+# Weekly discovery — Monday 2am WIB (UTC+7 = Sunday 19:00 UTC)
+0 19 * * 0   python -m scripts.worker.run discover --sectors all
+
+# Daily embedding backfill — 3am WIB (8pm UTC)
+0 20 * * *   python -m scripts.worker.run embed --batch-size 200
+```
+
+### Manual operations
 
 ```bash
-# SSH into Railway service or run locally
+# From Railway service console or local:
 python -m scripts.worker.run stats
-python -m scripts.worker.run discover --sectors fintech
-python -m scripts.worker.run process --batch-size 5
-python -m scripts.worker.run retry-failed
+python -m scripts.worker.run retry           # retry failed jobs
+python -m scripts.worker.run reset-dead      # reset dead jobs for manual review
+python -m scripts.worker.run embed --batch-size 500
 ```
-
-### Cron (Railway Cron)
-
-Set a Railway Cron job to run discovery weekly:
-```
-0 2 * * 1   python -m scripts.worker.run discover --sectors all
-```
-
-(Monday 2am — after OJK publishes new regulations over the weekend)
 
 ---
 
-## Supabase
+## Database — Supabase
 
 ### Applying migrations
 
-Migrations are applied manually via Supabase SQL Editor — they are NOT run by any CI or deploy step.
+Use the **direct connection** (port 5432) for migrations — PgBouncer incompatible with migration `SET` commands.
 
 ```bash
-# Verify the next migration number
+# Verify next migration number
 ls packages/supabase/migrations/ | sort | tail -5
 
-# Then open Supabase SQL Editor and paste + run the .sql file
+# Apply via Supabase SQL Editor (recommended)
+# Or via psql:
+psql "postgresql://postgres:[password]@db.xxx.supabase.co:5432/postgres" -f packages/supabase/migrations/021_description.sql
 ```
 
-For heavy migrations (ALTER TABLE on large tables):
+Heavy migrations (ALTER TABLE on large tables):
 ```sql
--- Prepend to the migration:
 SET statement_timeout = '600s';
+-- then the migration SQL
 ```
 
-Run steps individually if needed — each ALTER TABLE separately.
+**Rule:** Never apply to production until migration CI passes on the PR.
 
 ### Backups
 
-Supabase provides daily automated backups on Pro plan. Before any migration that drops/renames columns, download a manual backup:
+Supabase Pro provides daily automated backups. Before any destructive migration:
 
 Supabase dashboard → Settings → Database → Backups → Download.
 
-### RLS check
+### RLS verification
 
-After applying a migration that adds a new table, verify RLS is enabled and the public read policy exists:
+After every migration that adds a table:
 
 ```sql
 -- Check RLS enabled
 SELECT tablename, rowsecurity FROM pg_tables
-WHERE schemaname = 'public' AND tablename = 'your_new_table';
+WHERE schemaname = 'public' AND tablename = 'your_table';
+-- rowsecurity must be 't'
 
--- Check policy exists
-SELECT * FROM pg_policies WHERE tablename = 'your_new_table';
+-- Check public read policy exists
+SELECT policyname, cmd FROM pg_policies
+WHERE tablename = 'your_table';
 
--- Quick test with anon key (should return data)
-SELECT count(*) FROM your_new_table;  -- run as anon role
+-- Verify with anon key (should return data, not [])
+-- Run in Supabase SQL Editor → switch role to 'anon'
 ```
 
----
+### PgBouncer monitoring
 
-## Domain
+Watch connection count — if approaching the limit, connections queue and latency spikes.
 
-`regulasi.id` → managed via Vercel Domains.
+Supabase dashboard → Reports → Database → Connections.
 
-DNS: add CNAME record pointing `regulasi.id` to `cname.vercel-dns.com`.
+Free plan: 60 direct connections. Pro: 500. PgBouncer multiplexes these so the app can have thousands of "connections" through the pooler.
 
-SSL is managed automatically by Vercel (Let's Encrypt).
+### Materialized view refresh
 
----
-
-## Monitoring
-
-| What | Where |
-|------|-------|
-| Web errors | Vercel dashboard → Functions logs |
-| MCP server logs | Railway dashboard → service logs |
-| Pipeline errors | `crawl_jobs` table — rows with `status='failed'` and `error_message` |
-| DB query performance | Supabase dashboard → Reports → Slow queries |
-| API uptime | Add UptimeRobot or Better Uptime on `https://regulasi.id/api/v1/sectors` |
-
-### Alert on crawl failures
+pg_cron runs the refresh every 15 minutes automatically (migration 020). To force refresh:
 
 ```sql
--- Jobs stuck in 'crawling' for > 1 hour = something is wrong
-SELECT count(*) FROM crawl_jobs
-WHERE status = 'crawling' AND claimed_at < NOW() - INTERVAL '1 hour';
+REFRESH MATERIALIZED VIEW CONCURRENTLY mv_sector_stats;
+REFRESH MATERIALIZED VIEW CONCURRENTLY mv_type_stats;
 ```
 
-Set a Railway Cron job to run a health check script and alert to Slack/email if this count > 0.
+---
+
+## Redis — Upstash
+
+No infra to manage. Upstash is serverless — scales automatically.
+
+### Monitoring
+
+Upstash dashboard → Analytics:
+- Commands/sec — rate limiting activity
+- Hit rate — cache effectiveness (target > 50% for `get_article`)
+- Memory — should stay under 256MB on free tier
+
+If cache hit rate for `get_article` is low, TTL may be too short or cache key is wrong.
+
+### Flush cache
+
+In emergencies (stale data after bulk update):
+
+```bash
+# Redis CLI via Upstash dashboard console
+FLUSHDB
+```
+
+Or selectively:
+```bash
+# Flush all article caches
+SCAN 0 MATCH "article:*" COUNT 100
+# Then DEL each key
+```
+
+---
+
+## Domain — regulasi.id
+
+DNS via Vercel Domains. Add CNAME:
+```
+regulasi.id → cname.vercel-dns.com
+```
+
+SSL auto-managed by Vercel (Let's Encrypt, auto-renews).
+
+---
+
+## Sentry Setup
+
+Both web and MCP server send errors to Sentry. Configure:
+
+1. Create two Sentry projects: `regulasi-id-web` and `regulasi-id-mcp`
+2. Add `SENTRY_AUTH_TOKEN` to Vercel env — Vercel auto-uploads source maps on deploy
+3. Set alert rules: email on new issue, Slack on regression
+
+In code — web (`src/app/layout.tsx`):
+```typescript
+import * as Sentry from "@sentry/nextjs"
+Sentry.init({ dsn: process.env.NEXT_PUBLIC_SENTRY_DSN })
+```
+
+In code — MCP server (`server.py`):
+```python
+import sentry_sdk
+sentry_sdk.init(dsn=os.environ["SENTRY_DSN"])
+```
+
+---
+
+## Observability Stack
+
+| Signal | Tool | Where |
+|--------|------|-------|
+| Errors | Sentry | Web + MCP + pipeline |
+| Traces | `@vercel/otel` + OpenTelemetry | Web API routes + Server Components |
+| Product analytics | Plausible | Web (privacy-first, no cookies) |
+| Search analytics | `search_analytics` table | DB — read weekly |
+| Pipeline health | Railway logs (structlog JSON) | Worker service |
+| DB performance | Supabase dashboard → Slow queries | Production DB |
+| Uptime | UptimeRobot on `/api/v1/sectors` | Alert on downtime |
+| Redis | Upstash dashboard | Cache hit rate, command rate |
+
+---
+
+## Monitoring Queries
+
+```sql
+-- Stuck jobs (crawler may be down)
+SELECT count(*) FROM crawl_jobs
+WHERE status = 'crawling' AND claimed_at < NOW() - INTERVAL '1 hour';
+
+-- Failed jobs by sector
+SELECT sector_code, count(*) FROM crawl_jobs
+WHERE status = 'failed'
+GROUP BY sector_code ORDER BY count DESC;
+
+-- Zero-result searches (missing content signals)
+SELECT query, count(*) FROM search_analytics
+WHERE zero_results = true AND created_at > NOW() - INTERVAL '7 days'
+GROUP BY query ORDER BY count DESC LIMIT 20;
+
+-- Embedding coverage
+SELECT
+  count(*) FILTER (WHERE embedding IS NOT NULL) AS with_embedding,
+  count(*) AS total,
+  round(count(*) FILTER (WHERE embedding IS NOT NULL)::numeric / count(*) * 100, 1) AS coverage_pct
+FROM document_nodes WHERE node_type = 'pasal';
+```
 
 ---
 
 ## Secrets Rotation
 
-If a Supabase key is compromised:
+If any key is compromised:
 
-1. Supabase dashboard → Settings → API → Regenerate key
-2. Update in Vercel env vars → Redeploy
-3. Update in Railway env vars for MCP server → Redeploy
-4. Update in Railway env vars for worker → Redeploy
-5. Update local `.env` files on all dev machines
+**Supabase anon key** (low urgency — public key):
+1. Regenerate in Supabase → Settings → API
+2. Update Vercel env → redeploy
+3. Update Railway (MCP) → redeploy
 
-The `SUPABASE_ANON_KEY` is public (exposed in browser). Rotating it is low urgency. The `SUPABASE_SERVICE_ROLE_KEY` bypasses RLS — rotate immediately if leaked.
+**Supabase service role key** (high urgency — bypasses RLS):
+1. Regenerate immediately
+2. Update Vercel env → redeploy
+3. Update Railway (worker) → redeploy
+4. Update local `scripts/.env` on all machines
+5. Check Sentry for any suspicious requests logged before rotation
+
+**Upstash token:**
+1. Rotate in Upstash dashboard
+2. Update Vercel + Railway (both services)
+
+**OpenAI/Gemini API key:**
+1. Revoke in provider dashboard
+2. Issue new key
+3. Update Railway (worker) → redeploy

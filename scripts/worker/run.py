@@ -20,12 +20,14 @@ def _sectors(value: str) -> list[str]:
 @app.command()
 def discover(
     sectors: str = typer.Option(..., help="comma-separated sector codes"),
+    types: str = typer.Option("", "--types", help="comma-separated types (default POJK,SEOJK,KEOJK)"),
     dry_run: bool = typer.Option(False, "--dry-run"),
 ) -> None:
     """Crawl listing pages and seed crawl_jobs."""
     from .discover import discover as run_discover
 
-    count = asyncio.run(run_discover(_sectors(sectors), dry_run=dry_run))
+    type_list = _sectors(types) or None
+    count = asyncio.run(run_discover(_sectors(sectors), types=type_list, dry_run=dry_run))
     typer.echo(f"seeded {count} jobs")
 
 

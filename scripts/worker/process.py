@@ -107,12 +107,29 @@ async def download_and_parse(job: CrawlJob) -> None:
         state.update_status(job.id, "flagged")
         return
 
-    meta = extract_work_meta(detail_html, job.regulation_type or "POJK")
+    # Prefer the clean listing metadata captured at discovery; fall back to the
+    # detail page only when it is missing.
+    md = job.listing_metadata or {}
+    if md.get("title"):
+        meta = {
+            "title_id": md["title"],
+            "number": md.get("number") or "0",
+            "year": md.get("year") or 0,
+            "regulation_type": job.regulation_type or "POJK",
+        }
+        status = md.get("status") or "berlaku"
+        tentang = md.get("tentang")
+    else:
+        meta = extract_work_meta(detail_html, job.regulation_type or "POJK")
+        status = "berlaku"
+        tentang = None
+
     work = ParsedWork(
         sector=job.sector_code,
         source_url=job.source_url,
         source_pdf_url=source_registry.download_url(pdf_uuid),
-        status="berlaku",
+        status=status,
+        tentang=tentang,
         extraction_quality=quality,
         nodes=nodes,
         **meta,

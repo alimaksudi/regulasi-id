@@ -1,5 +1,5 @@
 from scripts.crawler import source_registry as sr
-from scripts.worker.discover import row_to_job
+from scripts.worker.discover import row_to_job, row_metadata
 
 
 def test_data_url():
@@ -46,3 +46,39 @@ def test_row_to_job_parses_detail_uuid():
 def test_row_to_job_skips_rows_without_link():
     assert row_to_job(["no link here", "x"], "perbankan", "POJK") is None
     assert row_to_job([], "perbankan", "POJK") is None
+
+
+def test_row_metadata_extracts_clean_fields():
+    row = [
+        "<a href='x'>Peraturan Otoritas Jasa Keuangan Nomor 9/POJK.03/2016 "
+        "tentang Prinsip Kehati-hatian</a>",
+        "9", "Perbankan", None, None, "Peraturan OJK", "", "Berlaku",
+    ]
+    md = row_metadata(row)
+    assert md["number"] == "9"
+    assert md["year"] == 2016
+    assert md["status"] == "berlaku"
+    assert md["tentang"] == "Prinsip Kehati-hatian"
+
+
+def test_row_metadata_handles_capitalized_tentang():
+    # Real titles capitalize "Tentang"; splitting on lowercase used to crash.
+    row = [
+        "<a href='x'>Peraturan OJK Nomor 5/POJK.03/2022 "
+        "Tentang Lembaga Pengelola Informasi Perkreditan</a>",
+        "5", "Perbankan", None, None, "Peraturan OJK", "", "Berlaku",
+    ]
+    md = row_metadata(row)
+    assert md["year"] == 2022
+    assert md["tentang"] == "Lembaga Pengelola Informasi Perkreditan"
+
+
+def test_row_to_job_includes_metadata_and_maps_status():
+    row = [
+        "<a href='https://jdih.ojk.go.id/Web/ViewPeraturan/Detail/"
+        "53eb4326-67df-d103-ca6e-c4167419e97d/01/06'>POJK Nomor 1/POJK.03/2023 tentang X</a>",
+        "1", "Perbankan", None, None, "Peraturan OJK", "", "Tidak Berlaku",
+    ]
+    job = row_to_job(row, "perbankan", "POJK")
+    assert job["listing_metadata"]["year"] == 2023
+    assert job["listing_metadata"]["status"] == "tidak_berlaku"

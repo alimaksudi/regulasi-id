@@ -16,6 +16,32 @@ DETAIL_HREF_RE = re.compile(
     r"/Detail/([0-9a-fA-F-]{36})/(\d+)/(\d+)", re.IGNORECASE
 )
 TAG_RE = re.compile(r"<[^>]+>")
+YEAR_RE = re.compile(r"\b(19\d{2}|20\d{2})\b")
+
+# JDIH status label -> works.status value
+STATUS_MAP = {
+    "berlaku": "berlaku",
+    "tidak berlaku": "tidak_berlaku",
+    "dicabut": "dicabut",
+    "diubah": "diubah",
+}
+
+
+def row_metadata(row: list) -> dict:
+    """Clean title/number/year/status/tentang from a listing row."""
+    title = re.sub(r"\s+", " ", TAG_RE.sub("", row[0] or "")).strip()
+    year_m = YEAR_RE.search(title)
+    # "Tentang" appears in mixed case in real titles; split case-insensitively.
+    tentang_m = re.search(r"\btentang\b", title, re.IGNORECASE)
+    tentang = title[tentang_m.end():].strip() if tentang_m else None
+    status_raw = (row[7] or "").strip().lower() if len(row) > 7 else ""
+    return {
+        "title": title,
+        "number": str(row[1]).strip() if len(row) > 1 and row[1] else None,
+        "year": int(year_m.group(1)) if year_m else None,
+        "status": STATUS_MAP.get(status_raw, "berlaku"),
+        "tentang": tentang,
+    }
 
 
 def row_to_job(row: list, sector: str, reg_type: str) -> dict | None:
@@ -33,6 +59,7 @@ def row_to_job(row: list, sector: str, reg_type: str) -> dict | None:
         "source_url": source_registry.detail_url(uuid, sektor, jenis),
         "detail_uuid": uuid,
         "status": "pending",
+        "listing_metadata": row_metadata(row),
     }
 
 

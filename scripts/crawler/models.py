@@ -43,3 +43,4 @@ class CrawlJob(BaseModel):
     status: str = "pending"
     retry_count: int = 0
     work_id: int | None = None
+    listing_metadata: dict | None = None  # title/number/year/status from the listing

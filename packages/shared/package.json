@@ -1,0 +1,12 @@
+{
+  "name": "@regulasi-id/shared",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    "./schemas": "./schemas/index.ts"
+  },
+  "dependencies": {
+    "zod": "^4.4.3"
+  }
+}

@@ -1,0 +1,83 @@
+name: CI
+
+on:
+  push:
+    branches: [main, "build/**"]
+  pull_request:
+
+jobs:
+  migrations:
+    name: DB migrations
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: supabase/postgres:15.8.1.060
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 40
+    steps:
+      - uses: actions/checkout@v4
+      - name: Wait for a stable database
+        env:
+          PGPASSWORD: postgres
+        run: |
+          # The supabase image bounces postgres once during first-boot init,
+          # so wait for several consecutive successful pings, not just one.
+          ok=0
+          for i in $(seq 1 60); do
+            if pg_isready -h localhost -U postgres >/dev/null 2>&1; then ok=$((ok+1)); else ok=0; fi
+            if [ "$ok" -ge 6 ]; then echo "database stable"; exit 0; fi
+            sleep 2
+          done
+          echo "database did not stabilize" >&2; exit 1
+      - name: Apply migrations in order
+        env:
+          PGPASSWORD: postgres
+        run: |
+          for f in $(ls packages/supabase/migrations/*.sql | sort); do
+            echo "applying $(basename "$f")"
+            psql -h localhost -U postgres -v ON_ERROR_STOP=1 -q -f "$f"
+          done
+          echo "all migrations applied"
+
+  typescript:
+    name: Typecheck and test (api, shared, web)
+    runs-on: ubuntu-latest
+    env:
+      PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install workspace
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Typecheck shared
+        run: npx tsc --noEmit -p packages/shared/tsconfig.json
+      - name: Typecheck api
+        run: npx tsc --noEmit -p apps/api/tsconfig.json
+      - name: Test api
+        run: npm --workspace @regulasi-id/api run test
+      - name: Generate web route tree
+        run: cd apps/web && npx tsr generate
+      - name: Typecheck web
+        run: cd apps/web && npx tsc --noEmit
+
+  python:
+    name: Pipeline unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install test deps
+        run: pip install pydantic pytest
+      - name: Run pipeline tests
+        run: python -m pytest scripts/tests -q

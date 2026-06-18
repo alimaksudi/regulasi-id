@@ -16,9 +16,11 @@ from ..parser.extract_pymupdf import extract_text
 from ..parser.parse_structure import parse_structure
 from ..parser.quality_scorer import score_extraction
 
-# <a href="/Web/ViewPeraturan/DownloadDokumen/{uuid}">Peraturan|Abstrak|FAQ</a>
-DOWNLOAD_RE = re.compile(
-    r'DownloadDokumen/([0-9a-fA-F-]{36})"[^>]*>\s*([^<]+)', re.IGNORECASE
+# Download links: /Web/ViewPeraturan/DownloadDokumen/{uuid}. On the real JDIH site
+# the link text is usually empty, so labels cannot be relied on for classification.
+DOWNLOAD_RE = re.compile(r"DownloadDokumen/([0-9a-fA-F-]{36})", re.IGNORECASE)
+DOWNLOAD_LABELED_RE = re.compile(
+    r'DownloadDokumen/([0-9a-fA-F-]{36})["\'][^>]*>\s*([^<]*)', re.IGNORECASE
 )
 TITLE_RE = re.compile(r"(?:Tentang|tentang)\s*[:\-]?\s*(.+)")
 NUMBER_RE = re.compile(r"Nomor\s+([0-9A-Za-z./-]+)", re.IGNORECASE)
@@ -26,10 +28,25 @@ YEAR_RE = re.compile(r"\b(19|20)\d{2}\b")
 
 
 def extract_download_uuids(html: str) -> dict[str, str]:
-    """Map a lowercased document label ('peraturan', 'abstrak', 'faq') to its UUID."""
+    """Classify download links into 'peraturan' / 'abstrak' / 'faq'. Labels are often
+    empty, so the first download link is treated as the main PDF (peraturan)."""
+    uuids: list[str] = []
+    for uuid in DOWNLOAD_RE.findall(html):
+        if uuid not in uuids:
+            uuids.append(uuid)
+
     out: dict[str, str] = {}
-    for uuid, label in DOWNLOAD_RE.findall(html):
-        out[label.strip().lower()] = uuid
+    for uuid, label in DOWNLOAD_LABELED_RE.findall(html):
+        lbl = label.strip().lower()
+        if "abstrak" in lbl:
+            out["abstrak"] = uuid
+        elif "faq" in lbl:
+            out["faq"] = uuid
+        elif "peraturan" in lbl:
+            out["peraturan"] = uuid
+
+    if "peraturan" not in out and uuids:
+        out["peraturan"] = uuids[0]
     return out
 
 

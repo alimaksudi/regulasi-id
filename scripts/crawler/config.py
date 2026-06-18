@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-BASE_URL = "http://jdih.ojk.go.id"
+# JDIH redirects http -> https.
+BASE_URL = "https://jdih.ojk.go.id"
 
 # 1 to 2 seconds between requests (SCRAPER.md gotcha).
 REQUEST_DELAY_SECONDS = 1.5

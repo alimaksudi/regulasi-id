@@ -1,0 +1,36 @@
+name = "regulasi-id-api"
+main = "src/index.ts"
+compatibility_date = "2025-06-01"
+compatibility_flags = ["nodejs_compat"]
+
+# account_id is read from the CLOUDFLARE_ACCOUNT_ID env var in CI,
+# or set it here for local deploys:
+# account_id = "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+
+[observability]
+enabled = true
+
+[vars]
+ENVIRONMENT = "production"
+ALLOWED_ORIGIN = "https://regulasi.id"
+
+[dev]
+port = 8787
+
+# Production route. The API runs on its own subdomain, separate from the web app.
+# Requires the regulasi.id zone to exist in this Cloudflare account.
+# [[routes]]
+# pattern = "api.regulasi.id/*"
+# zone_name = "regulasi.id"
+
+# Secrets are NOT stored here. Set them per environment:
+#   wrangler secret put SUPABASE_URL
+#   wrangler secret put SUPABASE_ANON_KEY
+#   wrangler secret put SUPABASE_SERVICE_ROLE_KEY
+#   wrangler secret put OPENAI_API_KEY
+#   wrangler secret put UPSTASH_REDIS_REST_URL
+#   wrangler secret put UPSTASH_REDIS_REST_TOKEN
+#   wrangler secret put SENTRY_DSN
+#   wrangler secret put ADMIN_JWT_SECRET
+#   wrangler secret put ADMIN_EMAILS
+# For local dev, put the same keys in apps/api/.dev.vars (gitignored).

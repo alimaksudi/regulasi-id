@@ -1,0 +1,9 @@
+{
+  "name": "regulasi-id",
+  "private": true,
+  "workspaces": [
+    "apps/api",
+    "apps/web",
+    "packages/shared"
+  ]
+}

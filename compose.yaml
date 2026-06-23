@@ -1,0 +1,175 @@
+# Local testing stack, everything in Docker.
+#
+#   docker compose up                 # db + backend + api + web
+#   docker compose --profile mcp up   # also the MCP server
+#
+# Ports on the host:
+#   web      http://localhost:3000
+#   api      http://localhost:8787
+#   gateway  http://localhost:54321   (Supabase-compatible REST, via PostgREST)
+#   srh      http://localhost:8079     (Upstash-compatible REST, over Redis)
+#   mcp      http://localhost:8000/mcp (with --profile mcp)
+#
+# The anon/service JWTs below are signed with PGRST_JWT_SECRET and are local-only.
+
+x-jwt-secret: &jwt_secret "super-secret-jwt-token-with-at-least-32-characters-long"
+x-anon-key: &anon_key "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJyb2xlIjoiYW5vbiIsImlzcyI6InN1cGFiYXNlIiwiaWF0IjoxNzAwMDAwMDAwLCJleHAiOjIwMDAwMDAwMDB9.6ldkvHM8WjwyHI_tKbJOgWu-VbulTx9jmeuEvNGSFkY"
+x-service-key: &service_key "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJyb2xlIjoic2VydmljZV9yb2xlIiwiaXNzIjoic3VwYWJhc2UiLCJpYXQiOjE3MDAwMDAwMDAsImV4cCI6MjAwMDAwMDAwMH0.mjENke8J4x_734atFXjInx76tWeHpG_5y1KaXY_3Smg"
+
+services:
+  db:
+    image: supabase/postgres:15.8.1.060
+    environment:
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "${DB_PORT:-54322}:5432"
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+
+  migrate:
+    image: postgres:15-alpine
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes:
+      - ./packages/supabase/migrations:/migrations:ro
+      - ./local/seed.sql:/seed.sql:ro
+      - ./local/migrate.sh:/migrate.sh:ro
+    entrypoint: ["sh", "/migrate.sh"]
+    restart: "no"
+
+  postgrest:
+    image: postgrest/postgrest:v12.2.3
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    environment:
+      PGRST_DB_URI: postgres://postgres:postgres@db:5432/postgres
+      PGRST_DB_SCHEMAS: public
+      PGRST_DB_ANON_ROLE: anon
+      PGRST_JWT_SECRET: *jwt_secret
+    restart: unless-stopped
+
+  gateway:
+    image: nginx:alpine
+    depends_on:
+      - postgrest
+    volumes:
+      - ./local/nginx.conf:/etc/nginx/nginx.conf:ro
+    ports:
+      - "${GATEWAY_PORT:-54321}:80"
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+
+  srh:
+    image: hiett/serverless-redis-http:latest
+    depends_on:
+      - redis
+    environment:
+      SRH_MODE: env
+      SRH_TOKEN: localtoken
+      SRH_CONNECTION_STRING: redis://redis:6379
+    ports:
+      - "${SRH_PORT:-8079}:80"
+    restart: unless-stopped
+
+  api:
+    image: node:22-slim
+    working_dir: /app
+    depends_on:
+      - gateway
+      - srh
+    environment:
+      WRANGLER_SEND_METRICS: "false"
+      PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
+      SUPABASE_URL: "http://gateway"
+      SUPABASE_ANON_KEY: *anon_key
+      SUPABASE_SERVICE_ROLE_KEY: *service_key
+      OPENAI_API_KEY: "none"
+      UPSTASH_REDIS_REST_URL: "http://srh"
+      UPSTASH_REDIS_REST_TOKEN: "localtoken"
+      SENTRY_DSN: "none"
+      ADMIN_JWT_SECRET: *jwt_secret
+      ADMIN_EMAILS: "admin@example.com"
+    volumes:
+      - ./:/app
+      - node_modules_root:/app/node_modules
+      - node_modules_api:/app/apps/api/node_modules
+      - node_modules_web:/app/apps/web/node_modules
+      - node_modules_shared:/app/packages/shared/node_modules
+    # Bindings are passed via --var since a nested .dev.vars bind mount conflicts
+    # with the /app mount on Docker Desktop. Same c.env.* access either way.
+    command:
+      - sh
+      - -c
+      - >
+        npm install --ignore-scripts --no-audit --no-fund &&
+        cd apps/api &&
+        exec npx wrangler dev --ip 0.0.0.0 --port 8787
+        --var ENVIRONMENT:development
+        --var ALLOWED_ORIGIN:http://localhost:3000
+        --var SUPABASE_URL:"$$SUPABASE_URL"
+        --var SUPABASE_ANON_KEY:"$$SUPABASE_ANON_KEY"
+        --var SUPABASE_SERVICE_ROLE_KEY:"$$SUPABASE_SERVICE_ROLE_KEY"
+        --var OPENAI_API_KEY:"$$OPENAI_API_KEY"
+        --var UPSTASH_REDIS_REST_URL:"$$UPSTASH_REDIS_REST_URL"
+        --var UPSTASH_REDIS_REST_TOKEN:"$$UPSTASH_REDIS_REST_TOKEN"
+        --var SENTRY_DSN:"$$SENTRY_DSN"
+        --var ADMIN_JWT_SECRET:"$$ADMIN_JWT_SECRET"
+        --var ADMIN_EMAILS:"$$ADMIN_EMAILS"
+    ports:
+      - "${API_PORT:-8787}:8787"
+    restart: unless-stopped
+
+  web:
+    image: node:22-slim
+    working_dir: /app
+    depends_on:
+      - api
+    environment:
+      VITE_API_URL: "http://localhost:${API_PORT:-8787}"
+      VITE_INTERNAL_API_URL: "http://api:8787"
+      PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
+    volumes:
+      - ./:/app
+      - node_modules_root:/app/node_modules
+      - node_modules_api:/app/apps/api/node_modules
+      - node_modules_web:/app/apps/web/node_modules
+      - node_modules_shared:/app/packages/shared/node_modules
+    command:
+      - sh
+      - -c
+      - "npm install --ignore-scripts --no-audit --no-fund && cd apps/web && exec npx vite dev --host 0.0.0.0 --port 3000"
+    ports:
+      - "${WEB_PORT:-3000}:3000"
+    restart: unless-stopped
+
+  mcp:
+    profiles: ["mcp"]
+    build: ./apps/mcp-server
+    depends_on:
+      - gateway
+      - srh
+    environment:
+      SUPABASE_URL: "http://gateway"
+      SUPABASE_ANON_KEY: *anon_key
+      UPSTASH_REDIS_REST_URL: "http://srh"
+      UPSTASH_REDIS_REST_TOKEN: "localtoken"
+      SENTRY_DSN: ""
+      PORT: "8000"
+    ports:
+      - "${MCP_PORT:-8000}:8000"
+    restart: unless-stopped
+
+volumes:
+  node_modules_root:
+  node_modules_api:
+  node_modules_web:
+  node_modules_shared:

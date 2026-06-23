@@ -27,27 +27,35 @@ NUMBER_RE = re.compile(r"Nomor\s+([0-9A-Za-z./-]+)", re.IGNORECASE)
 YEAR_RE = re.compile(r"\b(19|20)\d{2}\b")
 
 
-def extract_download_uuids(html: str) -> dict[str, str]:
-    """Classify download links into 'peraturan' / 'abstrak' / 'faq'. Labels are often
-    empty, so the first download link is treated as the main PDF (peraturan)."""
-    uuids: list[str] = []
-    for uuid in DOWNLOAD_RE.findall(html):
-        if uuid not in uuids:
-            uuids.append(uuid)
+def extract_download_uuids(html: str) -> dict:
+    """Return all download UUIDs in page order plus any that carry an explicit label.
 
-    out: dict[str, str] = {}
+    A detail page can hold several documents (regulation, abstract, FAQ) and the link
+    text is usually empty, so order/labels alone can't tell which is the regulation.
+    The main PDF is chosen later by which one actually parses as a regulation.
+    """
+    ordered: list[str] = []
+    for uuid in DOWNLOAD_RE.findall(html):
+        if uuid not in ordered:
+            ordered.append(uuid)
+
+    labeled: dict[str, str] = {}
     for uuid, label in DOWNLOAD_LABELED_RE.findall(html):
         lbl = label.strip().lower()
         if "abstrak" in lbl:
-            out["abstrak"] = uuid
+            labeled["abstrak"] = uuid
         elif "faq" in lbl:
-            out["faq"] = uuid
+            labeled["faq"] = uuid
         elif "peraturan" in lbl:
-            out["peraturan"] = uuid
+            labeled["peraturan"] = uuid
 
-    if "peraturan" not in out and uuids:
-        out["peraturan"] = uuids[0]
-    return out
+    return {"ordered": ordered, "labeled": labeled}
+
+
+def select_main_pdf(candidates: list[tuple[str, int]]) -> str | None:
+    """Pick the document with the most Pasal; that is the regulation itself,
+    not its abstract or FAQ. candidates is (uuid, pasal_count)."""
+    return max(candidates, key=lambda c: c[1])[0] if candidates else None
 
 
 def extract_work_meta(html: str, fallback_type: str) -> dict:
@@ -85,22 +93,39 @@ async def download_and_parse(job: CrawlJob) -> None:
         follow_redirects=True,
     ) as client:
         detail_html = (await client.get(job.source_url)).text
-        links = extract_download_uuids(detail_html)
-        pdf_uuid = job.pdf_uuid or links.get("peraturan")
-        if not pdf_uuid:
+        docs = extract_download_uuids(detail_html)
+        labeled = docs["labeled"]
+
+        # Candidate main-PDF UUIDs: an explicit job/label wins, else try every
+        # download on the page and let the parser decide which is the regulation.
+        if job.pdf_uuid:
+            candidates = [job.pdf_uuid]
+        elif labeled.get("peraturan"):
+            candidates = [labeled["peraturan"]]
+        else:
+            candidates = docs["ordered"]
+        if not candidates:
             raise ValueError("No PDF download UUID on detail page")
 
-        abstract_uuid = job.abstract_uuid or links.get("abstrak")
-        faq_uuid = job.faq_uuid or links.get("faq")
+        abstract_uuid = job.abstract_uuid or labeled.get("abstrak")
+        faq_uuid = job.faq_uuid or labeled.get("faq")
 
-        main_pdf, abstract_pdf, faq_pdf = await asyncio.gather(
-            _download(client, pdf_uuid),
+        candidate_blobs = await asyncio.gather(*[_download(client, u) for u in candidates])
+        abstract_pdf, faq_pdf = await asyncio.gather(
             _download(client, abstract_uuid),
             _download(client, faq_uuid),
         )
 
-    text, page_count = _extract(main_pdf)
-    nodes = parse_structure(text)
+    # Parse each candidate; the regulation is the one with the most Pasal.
+    parsed = []
+    for uuid, blob in zip(candidates, candidate_blobs):
+        c_text, c_pages = _extract(blob)
+        c_nodes = parse_structure(c_text)
+        c_pasal = sum(1 for n in c_nodes if n.node_type == "pasal")
+        parsed.append((uuid, c_text, c_pages, c_nodes, c_pasal))
+
+    pdf_uuid = select_main_pdf([(p[0], p[4]) for p in parsed])
+    text, page_count, nodes = next((p[1], p[2], p[3]) for p in parsed if p[0] == pdf_uuid)
     quality = score_extraction(nodes, page_count)
 
     if quality < config.QUALITY_FLAG_THRESHOLD:
